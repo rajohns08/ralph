@@ -20,16 +20,7 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # jq filter to extract streaming text from content_block_delta events
-# Falls back to assistant message content if partials are not available
-STREAM_TEXT_FILTER='
-  if .type == "stream_event" and .event.type == "content_block_delta" then
-    .event.delta.text // empty | gsub("\n"; "\r\n")
-  elif .type == "assistant" then
-    (.message.content[]? | select(.type == "text").text // empty) | gsub("\n"; "\r\n")
-  else
-    empty
-  end
-'
+STREAM_TEXT_FILTER='select(.type == "stream_event" and .event.type == "content_block_delta") | .event.delta.text // empty'
 
 usage() {
     echo "Usage: ralph <prompt> <max_iterations>"
