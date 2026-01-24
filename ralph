@@ -19,6 +19,18 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
+# jq filter to extract streaming text from content_block_delta events
+# Falls back to assistant message content if partials are not available
+STREAM_TEXT_FILTER='
+  if .type == "stream_event" and .event.type == "content_block_delta" then
+    .event.delta.text // empty | gsub("\n"; "\r\n")
+  elif .type == "assistant" then
+    (.message.content[]? | select(.type == "text").text // empty) | gsub("\n"; "\r\n")
+  else
+    empty
+  end
+'
+
 usage() {
     echo "Usage: ralph <prompt> <max_iterations>"
     echo "       ralph --resume <max_iterations>"
@@ -236,10 +248,26 @@ Important guidelines for task breakdown:
 
 Create the $RALPH_DIR directory if it doesn't exist, then write the tasks file."
 
-    # Run claude and capture output (use script to fake TTY for streaming)
+    # Run claude with stream-json for real-time output
     echo -e "${BLUE}--- Claude Output Start ---${NC}"
-    export CLAUDE_PROMPT="$planner_prompt"
-    if script -q /dev/null bash -c 'claude --dangerously-skip-permissions --print -p "$CLAUDE_PROMPT"' 2>&1 | tee -a "$LOG_FILE"; then
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    trap "rm -f $tmpfile" RETURN
+
+    if claude --dangerously-skip-permissions \
+        --verbose \
+        --print \
+        --output-format stream-json \
+        --include-partial-messages \
+        -p "$planner_prompt" 2>&1 \
+        | awk '/^\{/ { print; fflush() }' \
+        | tee "$tmpfile" \
+        | jq --unbuffered -rj "$STREAM_TEXT_FILTER"; then
+
+        # Log the final result
+        jq -r 'select(.type == "result").result // empty' "$tmpfile" >> "$LOG_FILE"
+
         echo -e "${BLUE}--- Claude Output End ---${NC}"
         log "Planner phase complete"
         return 0
@@ -312,8 +340,24 @@ Do NOT work on any other tasks. Focus only on this one."
     fi
 
     echo -e "${BLUE}--- Claude Output Start ---${NC}"
-    export CLAUDE_PROMPT="$builder_prompt"
-    if script -q /dev/null bash -c 'claude --dangerously-skip-permissions --print -p "$CLAUDE_PROMPT"' 2>&1 | tee -a "$LOG_FILE"; then
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    trap "rm -f $tmpfile" RETURN
+
+    if claude --dangerously-skip-permissions \
+        --verbose \
+        --print \
+        --output-format stream-json \
+        --include-partial-messages \
+        -p "$builder_prompt" 2>&1 \
+        | awk '/^\{/ { print; fflush() }' \
+        | tee "$tmpfile" \
+        | jq --unbuffered -rj "$STREAM_TEXT_FILTER"; then
+
+        # Log the final result
+        jq -r 'select(.type == "result").result // empty' "$tmpfile" >> "$LOG_FILE"
+
         echo -e "${BLUE}--- Claude Output End ---${NC}"
         log "Builder phase complete"
 
