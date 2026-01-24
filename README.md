@@ -47,13 +47,24 @@ ralph "<prompt>" <max_iterations>
 ralph "Add user authentication with JWT tokens" 10
 ```
 
+This saves the prompt to `.ralph/prompt.txt` for future use.
+
+Alternatively, create `.ralph/prompt.txt` first and run with just the iteration count:
+```bash
+mkdir -p .ralph
+echo "Add user authentication with JWT tokens" > .ralph/prompt.txt
+ralph 10
+```
+
 ### Resume an existing task
 
 ```bash
 ralph --resume <max_iterations>
+# or simply
+ralph <max_iterations>
 ```
 
-This continues from where you left off, using the existing `.ralph/tasks.md`.
+This continues from where you left off, using the existing `.ralph/prompt.txt`.
 
 ### Check status
 
@@ -62,6 +73,21 @@ ralph --status
 ```
 
 Shows the current task list and progress summary.
+
+### Dynamic Prompt Updates
+
+The prompt is stored in `.ralph/prompt.txt` and is **re-read on every iteration**. This means you can edit the prompt file while Ralph is running, and your changes will take effect on the next iteration.
+
+**Example:**
+```bash
+# Start ralph
+ralph "Build a todo API" 20
+
+# While ralph is running, edit the prompt to add more context
+echo "Build a todo API with user authentication and rate limiting" > .ralph/prompt.txt
+
+# Ralph will use the updated prompt on the next iteration
+```
 
 ## How It Works
 
@@ -94,6 +120,7 @@ Shows the current task list and progress summary.
 
 Ralph creates a `.ralph/` directory containing:
 
+- `prompt.txt` - The current prompt (editable while running)
 - `tasks.md` - The task list with status markers
 - `ralph.log` - Full execution log
 - `state` - Internal state tracking
@@ -133,6 +160,7 @@ REVIEWER PHASE - Reviewing Implementation
 - **Check status**: Use `--status` to see progress before resuming
 - **Review the log**: Check `.ralph/ralph.log` for detailed execution history
 - **Edit tasks manually**: You can edit `.ralph/tasks.md` to add, remove, or reorder tasks
+- **Update prompt dynamically**: Edit `.ralph/prompt.txt` while ralph runs to adjust instructions
 
 ## License
 

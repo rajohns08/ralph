@@ -10,6 +10,7 @@ RALPH_DIR=".ralph"
 TASKS_FILE="$RALPH_DIR/tasks.md"
 LOG_FILE="$RALPH_DIR/ralph.log"
 STATE_FILE="$RALPH_DIR/state"
+PROMPT_FILE="$RALPH_DIR/prompt.txt"
 
 # Colors for output
 RED='\033[0;31m'
@@ -32,27 +33,37 @@ STREAM_TEXT_FILTER='
 
 usage() {
     echo "Usage: ralph <prompt> <max_iterations>"
+    echo "       ralph <max_iterations>              (uses existing .ralph/prompt.txt)"
     echo "       ralph --resume <max_iterations>"
     echo "       ralph --status"
     echo ""
     echo "Arguments:"
-    echo "  prompt          The instructions/goal for the task"
+    echo "  prompt          The instructions/goal for the task (saved to .ralph/prompt.txt)"
     echo "  max_iterations  Maximum number of builder/reviewer cycles"
     echo ""
     echo "Options:"
-    echo "  --resume        Resume from existing .ralph/tasks.md"
+    echo "  --resume        Resume from existing .ralph/prompt.txt"
     echo "  --status        Show current task status and exit"
+    echo ""
+    echo "The prompt is stored in .ralph/prompt.txt and can be edited while ralph runs."
+    echo "Changes take effect on the next iteration."
     exit 1
 }
 
-# Extract the original prompt from tasks.md
-get_saved_prompt() {
-    if [[ ! -f "$TASKS_FILE" ]]; then
+# Get the current prompt from prompt.txt (allows dynamic updates)
+get_current_prompt() {
+    if [[ -f "$PROMPT_FILE" ]]; then
+        cat "$PROMPT_FILE"
+    else
         echo ""
-        return
     fi
-    # Extract text between "## Original Prompt" and the next "##"
-    sed -n '/^## Original Prompt$/,/^##/{/^## Original Prompt$/d;/^##/d;p;}' "$TASKS_FILE" | sed '/^$/d'
+}
+
+# Save prompt to prompt.txt
+save_prompt() {
+    local prompt="$1"
+    mkdir -p "$RALPH_DIR"
+    echo "$prompt" > "$PROMPT_FILE"
 }
 
 log() {
@@ -107,8 +118,8 @@ get_tasks_section() {
 
 # Show current status
 show_status() {
-    if [[ ! -f "$TASKS_FILE" ]]; then
-        echo -e "${RED}No .ralph/tasks.md found. Nothing to resume.${NC}"
+    if [[ ! -f "$PROMPT_FILE" ]]; then
+        echo -e "${RED}No .ralph/prompt.txt found. Nothing to resume.${NC}"
         exit 1
     fi
 
@@ -116,8 +127,8 @@ show_status() {
     echo ""
 
     local prompt
-    prompt=$(get_saved_prompt)
-    echo -e "${YELLOW}Original Prompt:${NC}"
+    prompt=$(get_current_prompt)
+    echo -e "${YELLOW}Current Prompt:${NC}"
     echo "$prompt"
     echo ""
 
@@ -479,9 +490,9 @@ main() {
                 usage
             fi
             max_iterations="$2"
-            prompt=$(get_saved_prompt)
+            prompt=$(get_current_prompt)
             if [[ -z "$prompt" ]]; then
-                echo -e "${RED}Error: No .ralph/tasks.md found. Nothing to resume.${NC}"
+                echo -e "${RED}Error: No .ralph/prompt.txt found. Nothing to resume.${NC}"
                 exit 1
             fi
             ;;
@@ -489,11 +500,21 @@ main() {
             usage
             ;;
         *)
-            if [[ $# -lt 2 ]]; then
+            # Check if single arg is a number (max_iterations only, use existing prompt.txt)
+            if [[ $# -eq 1 && "$1" =~ ^[0-9]+$ ]]; then
+                max_iterations="$1"
+                prompt=$(get_current_prompt)
+                if [[ -z "$prompt" ]]; then
+                    echo -e "${RED}Error: No .ralph/prompt.txt found. Provide a prompt or create .ralph/prompt.txt${NC}"
+                    exit 1
+                fi
+                resume_mode=true
+            elif [[ $# -lt 2 ]]; then
                 usage
+            else
+                prompt="$1"
+                max_iterations="$2"
             fi
-            prompt="$1"
-            max_iterations="$2"
             ;;
     esac
 
@@ -505,10 +526,12 @@ main() {
 
     init_ralph
 
-    if [[ "$resume_mode" == true ]]; then
-        log "Resuming Ralph"
-    else
+    # Save prompt to file if starting fresh (not resuming)
+    if [[ "$resume_mode" != true ]]; then
+        save_prompt "$prompt"
         log "Starting Ralph"
+    else
+        log "Resuming Ralph"
     fi
     log "Prompt: $prompt"
     log "Max iterations: $max_iterations"
@@ -525,9 +548,13 @@ main() {
         local next_role
         next_role=$(determine_next_role)
 
+        # Always get the latest prompt from file (allows dynamic updates)
+        local current_prompt
+        current_prompt=$(get_current_prompt)
+
         case "$next_role" in
             "planner")
-                run_planner "$prompt"
+                run_planner "$current_prompt"
                 ;;
             "builder")
                 local task
@@ -536,17 +563,17 @@ main() {
                     log "No pending tasks found but not all complete. Check task file."
                     exit 1
                 fi
-                run_builder "$prompt" "$task" "false"
+                run_builder "$current_prompt" "$task" "false"
                 ;;
             "builder_fix")
                 local task
                 task=$(get_current_task)
-                run_builder "$prompt" "$task" "true"
+                run_builder "$current_prompt" "$task" "true"
                 ;;
             "reviewer")
                 local task
                 task=$(get_current_task)
-                run_reviewer "$prompt" "$task"
+                run_reviewer "$current_prompt" "$task"
                 ;;
             "done")
                 log_section "ALL TASKS COMPLETE"
