@@ -1,0 +1,534 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Ralph - Alternating Builder/Reviewer loop using claude and codex
+# Usage: ralph <prompt> <max_iterations>
+#        ralph --resume <max_iterations>
+
+RALPH_DIR=".ralph"
+TASKS_FILE="$RALPH_DIR/tasks.md"
+LOG_FILE="$RALPH_DIR/ralph.log"
+STATE_FILE="$RALPH_DIR/state"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+usage() {
+    echo "Usage: ralph <prompt> <max_iterations>"
+    echo "       ralph --resume <max_iterations>"
+    echo "       ralph --status"
+    echo ""
+    echo "Arguments:"
+    echo "  prompt          The instructions/goal for the task"
+    echo "  max_iterations  Maximum number of builder/reviewer cycles"
+    echo ""
+    echo "Options:"
+    echo "  --resume        Resume from existing .ralph/tasks.md"
+    echo "  --status        Show current task status and exit"
+    exit 1
+}
+
+# Extract the original prompt from tasks.md
+get_saved_prompt() {
+    if [[ ! -f "$TASKS_FILE" ]]; then
+        echo ""
+        return
+    fi
+    # Extract text between "## Original Prompt" and the next "##"
+    sed -n '/^## Original Prompt$/,/^##/{/^## Original Prompt$/d;/^##/d;p;}' "$TASKS_FILE" | sed '/^$/d'
+}
+
+log() {
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] $*" >> "$LOG_FILE"
+    echo -e "${CYAN}[$timestamp]${NC} $*"
+}
+
+log_section() {
+    echo "" >> "$LOG_FILE"
+    echo "========================================" >> "$LOG_FILE"
+    echo "$*" >> "$LOG_FILE"
+    echo "========================================" >> "$LOG_FILE"
+    echo ""
+    echo -e "${YELLOW}========================================${NC}"
+    echo -e "${YELLOW}$*${NC}"
+    echo -e "${YELLOW}========================================${NC}"
+}
+
+init_ralph() {
+    mkdir -p "$RALPH_DIR"
+    if [[ ! -f "$LOG_FILE" ]]; then
+        touch "$LOG_FILE"
+    fi
+    # State tracks: iteration number and next_role (builder/reviewer)
+    if [[ ! -f "$STATE_FILE" ]]; then
+        echo "iteration=0" > "$STATE_FILE"
+        echo "next_role=planner" >> "$STATE_FILE"
+    fi
+}
+
+get_state() {
+    local key="$1"
+    grep "^${key}=" "$STATE_FILE" | cut -d'=' -f2
+}
+
+set_state() {
+    local key="$1"
+    local value="$2"
+    if grep -q "^${key}=" "$STATE_FILE"; then
+        sed -i '' "s/^${key}=.*/${key}=${value}/" "$STATE_FILE"
+    else
+        echo "${key}=${value}" >> "$STATE_FILE"
+    fi
+}
+
+# Extract only the tasks section (between "## Tasks" and the next "##" or "---")
+get_tasks_section() {
+    sed -n '/^## Tasks$/,/^##\|^---/p' "$TASKS_FILE" | grep '^\- \['
+}
+
+# Show current status
+show_status() {
+    if [[ ! -f "$TASKS_FILE" ]]; then
+        echo -e "${RED}No .ralph/tasks.md found. Nothing to resume.${NC}"
+        exit 1
+    fi
+
+    echo -e "${CYAN}=== Ralph Status ===${NC}"
+    echo ""
+
+    local prompt
+    prompt=$(get_saved_prompt)
+    echo -e "${YELLOW}Original Prompt:${NC}"
+    echo "$prompt"
+    echo ""
+
+    echo -e "${YELLOW}Tasks:${NC}"
+    get_tasks_section
+    echo ""
+
+    local pending ready rejected completed
+    # Count directly from file (grep -c returns 1 on no match, so use || true)
+    pending=$(grep -c '^\- \[ \]' "$TASKS_FILE" 2>/dev/null) || pending=0
+    ready=$(grep -c '^\- \[R\]' "$TASKS_FILE" 2>/dev/null) || ready=0
+    rejected=$(grep -c '^\- \[!\]' "$TASKS_FILE" 2>/dev/null) || rejected=0
+    completed=$(grep -c '^\- \[x\]' "$TASKS_FILE" 2>/dev/null) || completed=0
+
+    echo -e "${YELLOW}Summary:${NC}"
+    echo "  Completed: $completed"
+    echo "  Pending:   $pending"
+    echo "  In Review: $ready"
+    echo "  Rejected:  $rejected"
+
+    # Check counts as simple integers
+    if [[ "$pending" == "0" && "$ready" == "0" && "$rejected" == "0" ]]; then
+        echo ""
+        echo -e "${GREEN}All tasks complete!${NC}"
+    else
+        echo ""
+        echo -e "Run ${CYAN}ralph --resume <max_iterations>${NC} to continue."
+    fi
+}
+
+# Check if all tasks are completed (marked with [x])
+all_tasks_complete() {
+    if [[ ! -f "$TASKS_FILE" ]]; then
+        return 1
+    fi
+
+    # Check if any pending, ready for review, or rejected tasks exist in Tasks section
+    local tasks_section
+    tasks_section=$(get_tasks_section)
+
+    # If any non-complete tasks exist, return false
+    if echo "$tasks_section" | grep -q '^\- \[ \]' 2>/dev/null; then
+        return 1
+    fi
+    if echo "$tasks_section" | grep -q '^\- \[R\]' 2>/dev/null; then
+        return 1
+    fi
+    if echo "$tasks_section" | grep -q '^\- \[!\]' 2>/dev/null; then
+        return 1
+    fi
+
+    # All tasks must be [x] complete
+    return 0
+}
+
+# Check if there's a task ready for review
+has_task_ready_for_review() {
+    if [[ ! -f "$TASKS_FILE" ]]; then
+        return 1
+    fi
+    get_tasks_section | grep -q '^\- \[R\]' 2>/dev/null
+}
+
+# Check if there's a rejected task needing fixes
+has_rejected_task() {
+    if [[ ! -f "$TASKS_FILE" ]]; then
+        return 1
+    fi
+    get_tasks_section | grep -q '^\- \[!\]' 2>/dev/null
+}
+
+# Get the task currently under review or rejected
+get_current_task() {
+    local tasks_section
+    tasks_section=$(get_tasks_section)
+
+    if has_task_ready_for_review; then
+        echo "$tasks_section" | grep '^\- \[R\]' | head -1 | sed 's/^- \[R\] //'
+    elif has_rejected_task; then
+        echo "$tasks_section" | grep '^\- \[!\]' | head -1 | sed 's/^- \[!\] //'
+    else
+        echo "$tasks_section" | grep '^\- \[ \]' | head -1 | sed 's/^- \[ \] //'
+    fi
+}
+
+# Run the planner phase - claude explores and creates task list
+run_planner() {
+    local prompt="$1"
+
+    log_section "PLANNER PHASE - Creating Task List"
+    log "Launching claude to explore codebase and create task list..."
+
+    local planner_prompt="You are a project planner. Your job is to:
+
+1. Read and understand this prompt: $prompt
+
+2. Explore the current working directory to understand the codebase structure and context.
+
+3. Create a detailed task list breaking down the work into small, focused tasks that won't overload context.
+
+4. Write the task list to $TASKS_FILE in this exact markdown format:
+
+# Task List
+
+## Original Prompt
+$prompt
+
+## Tasks
+- [ ] Task 1 description
+- [ ] Task 2 description
+- [ ] Task 3 description
+(etc.)
+
+## Task Legend
+\`[ ]\` = Pending
+\`[R]\` = Ready for review
+\`[x]\` = Approved/Complete
+\`[!]\` = Rejected (see comments below task)
+
+---
+
+Important guidelines for task breakdown:
+- Each task should be small and focused (completable in one iteration)
+- Tasks should be ordered logically (dependencies first)
+- Be specific about what each task should accomplish
+- Include any setup/scaffolding tasks first
+
+Create the $RALPH_DIR directory if it doesn't exist, then write the tasks file."
+
+    # Run claude and capture output (use script to fake TTY for streaming)
+    echo -e "${BLUE}--- Claude Output Start ---${NC}"
+    export CLAUDE_PROMPT="$planner_prompt"
+    if script -q /dev/null bash -c 'claude --dangerously-skip-permissions --print -p "$CLAUDE_PROMPT"' 2>&1 | tee -a "$LOG_FILE"; then
+        echo -e "${BLUE}--- Claude Output End ---${NC}"
+        log "Planner phase complete"
+        return 0
+    else
+        echo -e "${BLUE}--- Claude Output End ---${NC}"
+        log "Planner phase failed"
+        return 1
+    fi
+}
+
+# Run builder phase - claude implements the next task
+run_builder() {
+    local prompt="$1"
+    local task="$2"
+    local is_fix="$3"
+
+    if [[ "$is_fix" == "true" ]]; then
+        log_section "BUILDER PHASE - Fixing Rejected Task"
+        log "Task to fix: $task"
+
+        # Get rejection comments (lines after the rejected task until next task or section)
+        local rejection_comments
+        rejection_comments=$(awk '/^\- \[!\]/{found=1; next} found && /^(- \[|##|---)/{exit} found{print}' "$TASKS_FILE" | head -20)
+
+        local builder_prompt="You are a BUILDER. Your role is to fix code based on reviewer feedback.
+
+ORIGINAL PROMPT: $prompt
+
+TASK FILE: $TASKS_FILE
+
+YOUR CURRENT TASK (marked [!] - was rejected): $task
+
+REVIEWER'S FEEDBACK:
+$rejection_comments
+
+Instructions:
+1. Read the task file to understand the full context
+2. Address the reviewer's feedback and fix the issues mentioned
+3. Make the necessary code changes to satisfy the review
+4. Run tests if they exist and fix any failures
+5. When done, update $TASKS_FILE:
+   - Change the task from [!] to [R] (ready for review again)
+   - Remove or update the rejection comments
+
+Do NOT work on any other tasks. Focus only on fixing this one task based on feedback."
+
+    else
+        log_section "BUILDER PHASE - Implementing Next Task"
+        log "Task to implement: $task"
+
+        local builder_prompt="You are a BUILDER. Your role is to implement code changes.
+
+ORIGINAL PROMPT: $prompt
+
+TASK FILE: $TASKS_FILE
+
+YOUR CURRENT TASK (marked [ ] - pending): $task
+
+Instructions:
+1. Read the task file to understand the full context and see all tasks
+2. Implement ONLY this specific task - do not work on other tasks
+3. Make focused, clean code changes
+4. Run tests if they exist and fix any failures
+5. When done, update $TASKS_FILE:
+   - Change YOUR task from [ ] to [R] (ready for review)
+
+Do NOT mark the task as complete [x] - that's the reviewer's job.
+Do NOT work on any other tasks. Focus only on this one."
+
+    fi
+
+    echo -e "${BLUE}--- Claude Output Start ---${NC}"
+    export CLAUDE_PROMPT="$builder_prompt"
+    if script -q /dev/null bash -c 'claude --dangerously-skip-permissions --print -p "$CLAUDE_PROMPT"' 2>&1 | tee -a "$LOG_FILE"; then
+        echo -e "${BLUE}--- Claude Output End ---${NC}"
+        log "Builder phase complete"
+
+        # Commit the changes with a brief message
+        if git rev-parse --is-inside-work-tree &>/dev/null; then
+            log "Committing changes..."
+            local commit_msg
+            if [[ "$is_fix" == "true" ]]; then
+                commit_msg="fix: $task"
+            else
+                commit_msg="$task"
+            fi
+            # Truncate to single line, max 72 chars
+            commit_msg=$(echo "$commit_msg" | head -1 | cut -c1-72)
+            git add -A && git commit -m "$commit_msg" >> "$LOG_FILE" 2>&1 || true
+            log "Committed: $commit_msg"
+        fi
+
+        return 0
+    else
+        echo -e "${BLUE}--- Claude Output End ---${NC}"
+        log "Builder phase failed"
+        return 1
+    fi
+}
+
+# Run reviewer phase - codex reviews the implementation
+run_reviewer() {
+    local prompt="$1"
+    local task="$2"
+
+    log_section "REVIEWER PHASE - Reviewing Implementation"
+    log "Task under review: $task"
+
+    local reviewer_prompt="You are a REVIEWER. Your role is to review code changes.
+
+ORIGINAL PROMPT: $prompt
+
+TASK FILE: $TASKS_FILE
+
+TASK UNDER REVIEW (marked [R]): $task
+
+Instructions:
+1. Read the task file to understand what was supposed to be implemented
+2. Explore the codebase to find and review the changes made for THIS SPECIFIC TASK
+3. IMPORTANT: Only review changes pertaining to THIS task - do not re-review previously approved tasks
+4. Evaluate if the implementation:
+   - Correctly implements what the task describes
+   - Follows good coding practices
+   - Doesn't introduce obvious bugs or issues
+
+5. Make your decision and update $TASKS_FILE:
+
+   IF APPROVED:
+   - Change the task from [R] to [x] (complete)
+
+   IF REJECTED:
+   - Change the task from [R] to [!] (rejected)
+   - Add specific feedback comments on the lines immediately after the task, explaining:
+     - What is wrong
+     - What needs to be fixed
+     - Be specific and actionable
+
+Example of rejected task with comments:
+- [!] Implement user authentication
+  > Missing input validation on email field
+  > Password hashing should use bcrypt, not md5
+  > Need to add rate limiting
+
+Be fair but thorough. Only reject if there are real issues that need fixing."
+
+    echo -e "${GREEN}--- Codex Output Start ---${NC}"
+    # codex exec uses positional prompt or stdin with "-"
+    if echo "$reviewer_prompt" | codex exec --yolo --skip-git-repo-check - 2>&1 | tee -a "$LOG_FILE"; then
+        echo -e "${GREEN}--- Codex Output End ---${NC}"
+        log "Reviewer phase complete"
+        return 0
+    else
+        echo -e "${GREEN}--- Codex Output End ---${NC}"
+        log "Reviewer phase failed"
+        return 1
+    fi
+}
+
+# Determine next role based on task states
+determine_next_role() {
+    if [[ ! -f "$TASKS_FILE" ]]; then
+        echo "planner"
+    elif has_task_ready_for_review; then
+        echo "reviewer"
+    elif has_rejected_task; then
+        echo "builder_fix"
+    elif all_tasks_complete; then
+        echo "done"
+    else
+        echo "builder"
+    fi
+}
+
+# Main execution
+main() {
+    if [[ $# -lt 1 ]]; then
+        usage
+    fi
+
+    local prompt=""
+    local max_iterations=""
+    local resume_mode=false
+
+    # Parse arguments
+    case "$1" in
+        --status)
+            show_status
+            exit 0
+            ;;
+        --resume)
+            resume_mode=true
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --resume requires max_iterations"
+                usage
+            fi
+            max_iterations="$2"
+            prompt=$(get_saved_prompt)
+            if [[ -z "$prompt" ]]; then
+                echo -e "${RED}Error: No .ralph/tasks.md found. Nothing to resume.${NC}"
+                exit 1
+            fi
+            ;;
+        --help|-h)
+            usage
+            ;;
+        *)
+            if [[ $# -lt 2 ]]; then
+                usage
+            fi
+            prompt="$1"
+            max_iterations="$2"
+            ;;
+    esac
+
+    # Validate max_iterations is a number
+    if ! [[ "$max_iterations" =~ ^[0-9]+$ ]]; then
+        echo "Error: max_iterations must be a positive integer"
+        exit 1
+    fi
+
+    init_ralph
+
+    if [[ "$resume_mode" == true ]]; then
+        log "Resuming Ralph"
+    else
+        log "Starting Ralph"
+    fi
+    log "Prompt: $prompt"
+    log "Max iterations: $max_iterations"
+
+    local iteration=0
+
+    while [[ $iteration -lt $max_iterations ]]; do
+        iteration=$((iteration + 1))
+        set_state "iteration" "$iteration"
+
+        log ""
+        log "=== ITERATION $iteration of $max_iterations ==="
+
+        local next_role
+        next_role=$(determine_next_role)
+
+        case "$next_role" in
+            "planner")
+                run_planner "$prompt"
+                ;;
+            "builder")
+                local task
+                task=$(get_current_task)
+                if [[ -z "$task" ]]; then
+                    log "No pending tasks found but not all complete. Check task file."
+                    exit 1
+                fi
+                run_builder "$prompt" "$task" "false"
+                ;;
+            "builder_fix")
+                local task
+                task=$(get_current_task)
+                run_builder "$prompt" "$task" "true"
+                ;;
+            "reviewer")
+                local task
+                task=$(get_current_task)
+                run_reviewer "$prompt" "$task"
+                ;;
+            "done")
+                log_section "ALL TASKS COMPLETE"
+                log "All tasks have been approved. Exiting successfully."
+                echo ""
+                echo -e "${GREEN}Ralph completed all tasks successfully!${NC}"
+                echo "See $TASKS_FILE for the final task list."
+                echo "See $LOG_FILE for the full log."
+                exit 0
+                ;;
+            *)
+                log "Unknown role: $next_role"
+                exit 1
+                ;;
+        esac
+    done
+
+    log_section "MAX ITERATIONS REACHED"
+    log "Reached maximum iterations ($max_iterations). Stopping."
+    echo ""
+    echo -e "${YELLOW}Ralph reached maximum iterations.${NC}"
+    echo "See $TASKS_FILE for current task status."
+    echo "See $LOG_FILE for the full log."
+    echo ""
+    echo "To continue, run ralph again with the same or different max_iterations."
+}
+
+main "$@"
