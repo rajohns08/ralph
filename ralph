@@ -19,8 +19,16 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# jq filter to extract streaming text from content_block_delta events
-STREAM_TEXT_FILTER='select(.type == "stream_event" and .event.type == "content_block_delta") | .event.delta.text // empty'
+# jq filter to extract streaming text and tool calls from stream events
+STREAM_TEXT_FILTER='
+  if .type=="stream_event" and .event.type=="content_block_start" and .event.content_block.type=="tool_use"
+  then "\n[tool: " + .event.content_block.name + "]\n"
+  elif .type=="stream_event" and .event.type=="content_block_delta" and .event.delta.type=="input_json_delta"
+  then .event.delta.partial_json
+  elif .type=="stream_event" and .event.type=="content_block_delta" and .event.delta.type=="text_delta"
+  then .event.delta.text
+  else empty end
+'
 
 usage() {
     echo "Usage: ralph <prompt> <max_iterations>"
