@@ -251,6 +251,30 @@ init_ralph() {
     fi
 }
 
+# Global start time for total elapsed calculation
+RALPH_START_TIME=""
+
+# Get total elapsed time since ralph started (formatted as HH:MM:SS or MM:SS)
+get_total_elapsed() {
+    if [[ -z "$RALPH_START_TIME" ]]; then
+        echo "0s"
+        return
+    fi
+    local now elapsed hours mins secs
+    now=$(date +%s)
+    elapsed=$((now - RALPH_START_TIME))
+    hours=$((elapsed / 3600))
+    mins=$(( (elapsed % 3600) / 60 ))
+    secs=$((elapsed % 60))
+    if [[ $hours -gt 0 ]]; then
+        printf "%d:%02d:%02d" "$hours" "$mins" "$secs"
+    elif [[ $mins -gt 0 ]]; then
+        printf "%d:%02d" "$mins" "$secs"
+    else
+        printf "%ds" "$secs"
+    fi
+}
+
 get_state() {
     local key="$1"
     grep "^${key}=" "$STATE_FILE" | cut -d'=' -f2
@@ -479,7 +503,7 @@ Create the $RALPH_DIR directory if it doesn't exist, then write the tasks file."
         local end_time elapsed_time
         end_time=$(date +%s)
         elapsed_time=$((end_time - start_time))
-        log "Planner phase complete (runtime: ${elapsed_time}s)"
+        log "Planner phase complete (total: $(get_total_elapsed))"
         rm -f "$debug_file"
         return 0
     else
@@ -488,7 +512,7 @@ Create the $RALPH_DIR directory if it doesn't exist, then write the tasks file."
         local end_time elapsed_time
         end_time=$(date +%s)
         elapsed_time=$((end_time - start_time))
-        log "Planner phase failed (runtime: ${elapsed_time}s)"
+        log "Planner phase failed (total: $(get_total_elapsed))"
         rm -f "$debug_file"
         return 1
     fi
@@ -570,7 +594,7 @@ Be constructive but thorough. Only approve if the plan is genuinely ready for im
         local end_time elapsed_time
         end_time=$(date +%s)
         elapsed_time=$((end_time - start_time))
-        log "Plan review phase complete (runtime: ${elapsed_time}s)"
+        log "Plan review phase complete (total: $(get_total_elapsed))"
         rm -f "$codex_debug_file"
         return 0
     else
@@ -579,7 +603,7 @@ Be constructive but thorough. Only approve if the plan is genuinely ready for im
         local end_time elapsed_time
         end_time=$(date +%s)
         elapsed_time=$((end_time - start_time))
-        log "Plan review phase failed (runtime: ${elapsed_time}s)"
+        log "Plan review phase failed (total: $(get_total_elapsed))"
         rm -f "$codex_debug_file"
         return 1
     fi
@@ -662,7 +686,7 @@ Make thoughtful changes based on the feedback. The goal is a solid, implementabl
         local end_time elapsed_time
         end_time=$(date +%s)
         elapsed_time=$((end_time - start_time))
-        log "Plan refinement phase complete (runtime: ${elapsed_time}s)"
+        log "Plan refinement phase complete (total: $(get_total_elapsed))"
         rm -f "$debug_file"
         return 0
     else
@@ -671,7 +695,7 @@ Make thoughtful changes based on the feedback. The goal is a solid, implementabl
         local end_time elapsed_time
         end_time=$(date +%s)
         elapsed_time=$((end_time - start_time))
-        log "Plan refinement phase failed (runtime: ${elapsed_time}s)"
+        log "Plan refinement phase failed (total: $(get_total_elapsed))"
         rm -f "$debug_file"
         return 1
     fi
@@ -784,7 +808,7 @@ Do NOT work on any other tasks. Focus only on this one."
         local end_time elapsed_time
         end_time=$(date +%s)
         elapsed_time=$((end_time - start_time))
-        log "Builder phase complete (runtime: ${elapsed_time}s)"
+        log "Builder phase complete (total: $(get_total_elapsed))"
         rm -f "$debug_file"
 
         # Commit the changes with a brief message
@@ -809,7 +833,7 @@ Do NOT work on any other tasks. Focus only on this one."
         local end_time elapsed_time
         end_time=$(date +%s)
         elapsed_time=$((end_time - start_time))
-        log "Builder phase failed (runtime: ${elapsed_time}s)"
+        log "Builder phase failed (total: $(get_total_elapsed))"
         rm -f "$debug_file"
         return 1
     fi
@@ -894,7 +918,7 @@ Be fair but thorough. Only reject if there are real issues that need fixing."
         local end_time elapsed_time
         end_time=$(date +%s)
         elapsed_time=$((end_time - start_time))
-        log "Reviewer phase complete (runtime: ${elapsed_time}s)"
+        log "Reviewer phase complete (total: $(get_total_elapsed))"
         rm -f "$codex_debug_file"
         return 0
     else
@@ -903,7 +927,7 @@ Be fair but thorough. Only reject if there are real issues that need fixing."
         local end_time elapsed_time
         end_time=$(date +%s)
         elapsed_time=$((end_time - start_time))
-        log "Reviewer phase failed (runtime: ${elapsed_time}s)"
+        log "Reviewer phase failed (total: $(get_total_elapsed))"
         rm -f "$codex_debug_file"
         return 1
     fi
@@ -986,6 +1010,9 @@ main() {
     fi
 
     init_ralph
+
+    # Record start time for total elapsed tracking
+    RALPH_START_TIME=$(date +%s)
 
     # Save prompt to file if starting fresh (not resuming)
     if [[ "$resume_mode" != true ]]; then
