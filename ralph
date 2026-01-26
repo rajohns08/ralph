@@ -75,8 +75,12 @@ get_claude_stream_filter() {
 then "\n\u001b[1;33m[tool: " + .event.content_block.name + "]\u001b[0m "
 elif .type=="stream_event" and .event.type=="content_block_delta" and .event.delta.type=="input_json_delta"
 then "\u001b[1;33m" + .event.delta.partial_json + "\u001b[0m"
+elif .type=="stream_event" and .event.type=="content_block_start" and .event.content_block.type=="thinking"
+then "\n"
 elif .type=="stream_event" and .event.type=="content_block_delta" and .event.delta.type=="thinking_delta"
 then "\u001b[38;5;174m" + .event.delta.thinking + "\u001b[0m"
+elif .type=="stream_event" and .event.type=="content_block_start" and .event.content_block.type=="text"
+then "\n"
 elif .type=="stream_event" and .event.type=="content_block_delta" and .event.delta.type=="text_delta"
 then .event.delta.text
 elif .type=="stream_event" and .event.type=="message_start"
@@ -409,7 +413,7 @@ Create the $RALPH_DIR directory if it doesn't exist, then write the tasks file."
     local tmpfile
     tmpfile=$(mktemp)
     # Also save to debug file for inspection
-    local debug_file="$RALPH_DIR/debug_stream.json"
+    local debug_file="$RALPH_DIR/debug_claude_stream.json"
     trap "rm -f $tmpfile" RETURN
 
     local stream_filter
@@ -442,10 +446,12 @@ Create the $RALPH_DIR directory if it doesn't exist, then write the tasks file."
         fi
 
         log "Planner phase complete"
+        rm -f "$debug_file"
         return 0
     else
         echo -e "${BLUE}--- Claude Output End ---${NC}"
         log "Planner phase failed"
+        rm -f "$debug_file"
         return 1
     fi
 }
@@ -515,7 +521,7 @@ Do NOT work on any other tasks. Focus only on this one."
 
     local tmpfile
     tmpfile=$(mktemp)
-    local debug_file="$RALPH_DIR/debug_stream.json"
+    local debug_file="$RALPH_DIR/debug_claude_stream.json"
     trap "rm -f $tmpfile" RETURN
 
     local stream_filter
@@ -548,6 +554,7 @@ Do NOT work on any other tasks. Focus only on this one."
         fi
 
         log "Builder phase complete"
+        rm -f "$debug_file"
 
         # Commit the changes with a brief message
         if git rev-parse --is-inside-work-tree &>/dev/null; then
@@ -568,6 +575,7 @@ Do NOT work on any other tasks. Focus only on this one."
     else
         echo -e "${BLUE}--- Claude Output End ---${NC}"
         log "Builder phase failed"
+        rm -f "$debug_file"
         return 1
     fi
 }
@@ -637,10 +645,12 @@ Be fair but thorough. Only reject if there are real issues that need fixing."
         echo -e "${GREEN}--- Codex Output End ---${NC}"
 
         log "Reviewer phase complete"
+        rm -f "$codex_debug_file"
         return 0
     else
         echo -e "${GREEN}--- Codex Output End ---${NC}"
         log "Reviewer phase failed"
+        rm -f "$codex_debug_file"
         return 1
     fi
 }
