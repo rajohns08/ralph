@@ -381,9 +381,6 @@ run_planner() {
 
 # Task List
 
-## Original Prompt
-$prompt
-
 ## Tasks
 - [ ] Task 1 description
 - [ ] Task 2 description
