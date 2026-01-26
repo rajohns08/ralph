@@ -11,6 +11,7 @@ TASKS_FILE="$RALPH_DIR/tasks.md"
 LOG_FILE="$RALPH_DIR/ralph.log"
 STATE_FILE="$RALPH_DIR/state"
 PROMPT_FILE="$RALPH_DIR/prompt.txt"
+PLAN_FEEDBACK_FILE="$RALPH_DIR/plan_feedback.md"
 
 # Colors for output
 RED='\033[0;31m'
@@ -368,6 +369,32 @@ get_current_task() {
     fi
 }
 
+# Check if plan has been reviewed by codex
+plan_needs_review() {
+    # Plan needs review if tasks file exists but plan_reviewed state is not "true"
+    if [[ -f "$TASKS_FILE" ]]; then
+        local reviewed
+        reviewed=$(get_state "plan_reviewed")
+        if [[ "$reviewed" != "true" ]]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Check if plan feedback exists and needs refinement
+plan_needs_refinement() {
+    if [[ -f "$PLAN_FEEDBACK_FILE" ]]; then
+        # Check if feedback file contains actual feedback (not just approval)
+        local content
+        content=$(cat "$PLAN_FEEDBACK_FILE")
+        if [[ -n "$content" && ! "$content" =~ ^[[:space:]]*PLAN_APPROVED[[:space:]]*$ ]]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
 # Run the planner phase - claude explores and creates task list
 run_planner() {
     local prompt="$1"
@@ -462,6 +489,189 @@ Create the $RALPH_DIR directory if it doesn't exist, then write the tasks file."
         end_time=$(date +%s)
         elapsed_time=$((end_time - start_time))
         log "Planner phase failed (runtime: ${elapsed_time}s)"
+        rm -f "$debug_file"
+        return 1
+    fi
+}
+
+# Run plan reviewer phase - codex reviews the initial plan
+run_plan_reviewer() {
+    local prompt="$1"
+
+    log_section "PLAN REVIEW PHASE - Codex Reviewing Plan"
+    local start_time
+    start_time=$(date +%s)
+    log "Having Codex review the initial task plan..."
+
+    # Read the current tasks
+    local tasks_content
+    tasks_content=$(cat "$TASKS_FILE")
+
+    local plan_review_prompt="You are a PLAN REVIEWER. Your role is to review and provide feedback on a task plan before implementation begins.
+
+ORIGINAL PROMPT: $prompt
+
+TASK FILE: $TASKS_FILE
+
+CURRENT PLAN:
+$tasks_content
+
+Review the plan and evaluate:
+1. TASK GRANULARITY: Are tasks appropriately sized? Too big risks context overload, too small creates unnecessary overhead.
+2. MISSING TASKS: Are there any tasks that should be added to fully accomplish the goal?
+3. TASK DEPENDENCIES: Are tasks ordered correctly? Dependencies should come before dependent tasks.
+4. TASK ORDERING: Is the sequence logical for implementation?
+5. TECHNICAL APPROACH: Are there any concerns about the technical approach implied by the tasks?
+
+Your response MUST follow one of these two formats:
+
+IF THE PLAN IS GOOD (no changes needed):
+Write exactly: PLAN_APPROVED
+
+IF THE PLAN NEEDS CHANGES:
+Provide specific, actionable feedback. Be concrete about:
+- Which tasks need to be split, merged, reordered, or removed
+- What tasks are missing and where they should go
+- Any dependency issues
+- Any technical concerns
+
+Write your feedback to $PLAN_FEEDBACK_FILE.
+
+Be constructive but thorough. Only approve if the plan is genuinely ready for implementation."
+
+    # Log the full prompt
+    log "=== PLAN REVIEW PROMPT ==="
+    echo "$plan_review_prompt" | tee -a "$LOG_FILE"
+    log "=== END PLAN REVIEW PROMPT ==="
+
+    echo -e "${GREEN}--- Codex Output Start ---${NC}"
+    echo "--- Codex Output Start ---" >> "$LOG_FILE"
+
+    local codex_tmpfile
+    codex_tmpfile=$(mktemp)
+    local codex_debug_file="$RALPH_DIR/debug_codex_stream.json"
+    trap "rm -f $codex_tmpfile" RETURN
+
+    local stream_filter
+    stream_filter=$(get_codex_stream_filter)
+
+    if echo "$plan_review_prompt" | codex exec --yolo --skip-git-repo-check --json - 2>&1 \
+        | tee "$codex_tmpfile" "$codex_debug_file" \
+        | jq --unbuffered -rj "$stream_filter" \
+        | tee -a "$LOG_FILE"; then
+
+        echo ""
+        echo -e "${GREEN}--- Codex Output End ---${NC}"
+        echo "--- Codex Output End ---" >> "$LOG_FILE"
+
+        # Mark plan as reviewed
+        set_state "plan_reviewed" "true"
+
+        local end_time elapsed_time
+        end_time=$(date +%s)
+        elapsed_time=$((end_time - start_time))
+        log "Plan review phase complete (runtime: ${elapsed_time}s)"
+        rm -f "$codex_debug_file"
+        return 0
+    else
+        echo -e "${GREEN}--- Codex Output End ---${NC}"
+        echo "--- Codex Output End ---" >> "$LOG_FILE"
+        local end_time elapsed_time
+        end_time=$(date +%s)
+        elapsed_time=$((end_time - start_time))
+        log "Plan review phase failed (runtime: ${elapsed_time}s)"
+        rm -f "$codex_debug_file"
+        return 1
+    fi
+}
+
+# Run plan refiner phase - claude refines the plan based on codex feedback
+run_plan_refiner() {
+    local prompt="$1"
+
+    log_section "PLAN REFINEMENT PHASE - Claude Refining Plan"
+    local start_time
+    start_time=$(date +%s)
+    log "Having Claude refine the plan based on Codex feedback..."
+
+    # Read the feedback
+    local feedback
+    feedback=$(cat "$PLAN_FEEDBACK_FILE")
+
+    local refiner_prompt="You are a PLAN REFINER. Your role is to improve the task plan based on reviewer feedback.
+
+ORIGINAL PROMPT: $prompt
+
+TASK FILE: $TASKS_FILE
+
+CODEX REVIEWER FEEDBACK:
+$feedback
+
+Instructions:
+1. Read the current task list in $TASKS_FILE
+2. Carefully consider the feedback provided by the reviewer
+3. Update $TASKS_FILE with an improved plan that addresses the feedback:
+   - Split tasks that are too large
+   - Merge tasks that are too granular
+   - Add missing tasks
+   - Reorder tasks if dependencies are wrong
+   - Address any technical concerns
+4. Keep the same markdown format with [ ] for pending tasks
+
+Make thoughtful changes based on the feedback. The goal is a solid, implementable plan."
+
+    # Log the full prompt
+    log "=== PLAN REFINER PROMPT ==="
+    echo "$refiner_prompt" | tee -a "$LOG_FILE"
+    log "=== END PLAN REFINER PROMPT ==="
+
+    echo -e "${BLUE}--- Claude Output Start ---${NC}"
+    echo "--- Claude Output Start ---" >> "$LOG_FILE"
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    local debug_file="$RALPH_DIR/debug_claude_stream.json"
+    trap "rm -f $tmpfile" RETURN
+
+    local stream_filter
+    stream_filter=$(get_claude_stream_filter "$CLAUDE_CONTEXT_WINDOW")
+
+    if claude --dangerously-skip-permissions \
+        --verbose \
+        --print \
+        --output-format stream-json \
+        --include-partial-messages \
+        -p "$refiner_prompt" 2>&1 \
+        | awk '/^\{/ { print; fflush() }' \
+        | tee "$tmpfile" "$debug_file" \
+        | filter_write_edit_content \
+        | jq --unbuffered -rj "$stream_filter" \
+        | tee -a "$LOG_FILE"; then
+
+        echo -e "${BLUE}--- Claude Output End ---${NC}"
+        echo "--- Claude Output End ---" >> "$LOG_FILE"
+
+        # Display and log context usage
+        local usage
+        usage=$(get_claude_usage "$tmpfile" "$CLAUDE_CONTEXT_WINDOW")
+        display_context_usage "$usage" "$CLAUDE_CONTEXT_WINDOW"
+
+        # Clear the feedback file since we've addressed it
+        rm -f "$PLAN_FEEDBACK_FILE"
+
+        local end_time elapsed_time
+        end_time=$(date +%s)
+        elapsed_time=$((end_time - start_time))
+        log "Plan refinement phase complete (runtime: ${elapsed_time}s)"
+        rm -f "$debug_file"
+        return 0
+    else
+        echo -e "${BLUE}--- Claude Output End ---${NC}"
+        echo "--- Claude Output End ---" >> "$LOG_FILE"
+        local end_time elapsed_time
+        end_time=$(date +%s)
+        elapsed_time=$((end_time - start_time))
+        log "Plan refinement phase failed (runtime: ${elapsed_time}s)"
         rm -f "$debug_file"
         return 1
     fi
@@ -703,6 +913,10 @@ Be fair but thorough. Only reject if there are real issues that need fixing."
 determine_next_role() {
     if [[ ! -f "$TASKS_FILE" ]]; then
         echo "planner"
+    elif plan_needs_review; then
+        echo "plan_reviewer"
+    elif plan_needs_refinement; then
+        echo "plan_refiner"
     elif has_task_ready_for_review; then
         echo "reviewer"
     elif has_rejected_task; then
@@ -776,6 +990,9 @@ main() {
     # Save prompt to file if starting fresh (not resuming)
     if [[ "$resume_mode" != true ]]; then
         save_prompt "$prompt"
+        # Reset plan review state for fresh start
+        set_state "plan_reviewed" "false"
+        rm -f "$PLAN_FEEDBACK_FILE"
         log "Starting Ralph"
     else
         log "Resuming Ralph"
@@ -802,6 +1019,12 @@ main() {
         case "$next_role" in
             "planner")
                 run_planner "$current_prompt"
+                ;;
+            "plan_reviewer")
+                run_plan_reviewer "$current_prompt"
+                ;;
+            "plan_refiner")
+                run_plan_refiner "$current_prompt"
                 ;;
             "builder")
                 local task
