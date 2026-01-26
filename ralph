@@ -407,6 +407,11 @@ Important guidelines for task breakdown:
 
 Create the $RALPH_DIR directory if it doesn't exist, then write the tasks file."
 
+    # Log the full prompt
+    log "=== PLANNER PROMPT ==="
+    echo "$planner_prompt" | tee -a "$LOG_FILE"
+    log "=== END PLANNER PROMPT ==="
+
     # Run claude with stream-json for real-time output
     echo -e "${BLUE}--- Claude Output Start ---${NC}"
 
@@ -492,6 +497,11 @@ Instructions:
 
 Do NOT work on any other tasks. Focus only on fixing this one task based on feedback."
 
+        # Log the full prompt
+        log "=== BUILDER (FIX) PROMPT ==="
+        echo "$builder_prompt" | tee -a "$LOG_FILE"
+        log "=== END BUILDER (FIX) PROMPT ==="
+
     else
         log_section "BUILDER PHASE - Implementing Next Task"
         log "Task to implement: $task"
@@ -514,6 +524,11 @@ Instructions:
 
 Do NOT mark the task as complete [x] - that's the reviewer's job.
 Do NOT work on any other tasks. Focus only on this one."
+
+        # Log the full prompt
+        log "=== BUILDER PROMPT ==="
+        echo "$builder_prompt" | tee -a "$LOG_FILE"
+        log "=== END BUILDER PROMPT ==="
 
     fi
 
@@ -627,6 +642,11 @@ Example of rejected task with comments:
   > Need to add rate limiting
 
 Be fair but thorough. Only reject if there are real issues that need fixing."
+
+    # Log the full prompt
+    log "=== REVIEWER PROMPT ==="
+    echo "$reviewer_prompt" | tee -a "$LOG_FILE"
+    log "=== END REVIEWER PROMPT ==="
 
     echo -e "${GREEN}--- Codex Output Start ---${NC}"
 
