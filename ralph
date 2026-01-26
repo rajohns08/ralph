@@ -604,6 +604,9 @@ Instructions:
    - Correctly implements what the task describes
    - Follows good coding practices
    - Doesn't introduce obvious bugs or issues
+   - Is simple and well-architected (no over-engineering)
+   - Contains no dead code or unused variables/functions
+   - Has no unnecessary duplication (DRY principle)
 
 5. Make your decision and update $TASKS_FILE:
 
