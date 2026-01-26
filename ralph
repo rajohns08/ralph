@@ -373,6 +373,8 @@ run_planner() {
     local prompt="$1"
 
     log_section "PLANNER PHASE - Creating Task List"
+    local start_time
+    start_time=$(date +%s)
     log "Launching claude to explore codebase and create task list..."
 
     local planner_prompt="You are a project planner. Your job is to:
@@ -447,13 +449,19 @@ Create the $RALPH_DIR directory if it doesn't exist, then write the tasks file."
         usage=$(get_claude_usage "$tmpfile" "$CLAUDE_CONTEXT_WINDOW")
         display_context_usage "$usage" "$CLAUDE_CONTEXT_WINDOW"
 
-        log "Planner phase complete"
+        local end_time elapsed_time
+        end_time=$(date +%s)
+        elapsed_time=$((end_time - start_time))
+        log "Planner phase complete (runtime: ${elapsed_time}s)"
         rm -f "$debug_file"
         return 0
     else
         echo -e "${BLUE}--- Claude Output End ---${NC}"
         echo "--- Claude Output End ---" >> "$LOG_FILE"
-        log "Planner phase failed"
+        local end_time elapsed_time
+        end_time=$(date +%s)
+        elapsed_time=$((end_time - start_time))
+        log "Planner phase failed (runtime: ${elapsed_time}s)"
         rm -f "$debug_file"
         return 1
     fi
@@ -464,6 +472,8 @@ run_builder() {
     local prompt="$1"
     local task="$2"
     local is_fix="$3"
+    local start_time
+    start_time=$(date +%s)
 
     if [[ "$is_fix" == "true" ]]; then
         log_section "BUILDER PHASE - Fixing Rejected Task"
@@ -561,7 +571,10 @@ Do NOT work on any other tasks. Focus only on this one."
         usage=$(get_claude_usage "$tmpfile" "$CLAUDE_CONTEXT_WINDOW")
         display_context_usage "$usage" "$CLAUDE_CONTEXT_WINDOW"
 
-        log "Builder phase complete"
+        local end_time elapsed_time
+        end_time=$(date +%s)
+        elapsed_time=$((end_time - start_time))
+        log "Builder phase complete (runtime: ${elapsed_time}s)"
         rm -f "$debug_file"
 
         # Commit the changes with a brief message
@@ -583,7 +596,10 @@ Do NOT work on any other tasks. Focus only on this one."
     else
         echo -e "${BLUE}--- Claude Output End ---${NC}"
         echo "--- Claude Output End ---" >> "$LOG_FILE"
-        log "Builder phase failed"
+        local end_time elapsed_time
+        end_time=$(date +%s)
+        elapsed_time=$((end_time - start_time))
+        log "Builder phase failed (runtime: ${elapsed_time}s)"
         rm -f "$debug_file"
         return 1
     fi
@@ -595,6 +611,8 @@ run_reviewer() {
     local task="$2"
 
     log_section "REVIEWER PHASE - Reviewing Implementation"
+    local start_time
+    start_time=$(date +%s)
     log "Task under review: $task"
 
     local reviewer_prompt="You are a REVIEWER. Your role is to review code changes.
@@ -663,13 +681,19 @@ Be fair but thorough. Only reject if there are real issues that need fixing."
         echo -e "${GREEN}--- Codex Output End ---${NC}"
         echo "--- Codex Output End ---" >> "$LOG_FILE"
 
-        log "Reviewer phase complete"
+        local end_time elapsed_time
+        end_time=$(date +%s)
+        elapsed_time=$((end_time - start_time))
+        log "Reviewer phase complete (runtime: ${elapsed_time}s)"
         rm -f "$codex_debug_file"
         return 0
     else
         echo -e "${GREEN}--- Codex Output End ---${NC}"
         echo "--- Codex Output End ---" >> "$LOG_FILE"
-        log "Reviewer phase failed"
+        local end_time elapsed_time
+        end_time=$(date +%s)
+        elapsed_time=$((end_time - start_time))
+        log "Reviewer phase failed (runtime: ${elapsed_time}s)"
         rm -f "$codex_debug_file"
         return 1
     fi
