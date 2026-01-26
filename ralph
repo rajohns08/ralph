@@ -162,7 +162,7 @@ get_claude_usage() {
     fi
 }
 
-# Display context usage with color coding
+# Display context usage with color coding (to console and log)
 display_context_usage() {
     local usage="$1"
     local context_window="$2"
@@ -178,7 +178,9 @@ display_context_usage() {
             color="${YELLOW}"
         fi
 
-        echo -e "${color}[Context: ${pct}% used (${input} in + ${output} out = ${total}/${context_window} tokens)]${NC}"
+        local msg="[Context: ${pct}% used (${input} in + ${output} out = ${total}/${context_window} tokens)]"
+        echo -e "${color}${msg}${NC}"
+        echo "$msg" >> "$LOG_FILE"
     fi
 }
 
@@ -414,6 +416,7 @@ Create the $RALPH_DIR directory if it doesn't exist, then write the tasks file."
 
     # Run claude with stream-json for real-time output
     echo -e "${BLUE}--- Claude Output Start ---${NC}"
+    echo "--- Claude Output Start ---" >> "$LOG_FILE"
 
     local tmpfile
     tmpfile=$(mktemp)
@@ -433,28 +436,23 @@ Create the $RALPH_DIR directory if it doesn't exist, then write the tasks file."
         | awk '/^\{/ { print; fflush() }' \
         | tee "$tmpfile" "$debug_file" \
         | filter_write_edit_content \
-        | jq --unbuffered -rj "$stream_filter"; then
-
-        # Log the final result
-        jq -r 'select(.type == "result").result // empty' "$tmpfile" >> "$LOG_FILE"
+        | jq --unbuffered -rj "$stream_filter" \
+        | tee -a "$LOG_FILE"; then
 
         echo -e "${BLUE}--- Claude Output End ---${NC}"
+        echo "--- Claude Output End ---" >> "$LOG_FILE"
 
         # Display and log context usage
         local usage
         usage=$(get_claude_usage "$tmpfile" "$CLAUDE_CONTEXT_WINDOW")
         display_context_usage "$usage" "$CLAUDE_CONTEXT_WINDOW"
-        if [[ -n "$usage" ]]; then
-            local pct total input output
-            IFS=':' read -r pct total input output <<< "$usage"
-            log "Context usage: ${pct}% (${input} input + ${output} output = ${total} total tokens)"
-        fi
 
         log "Planner phase complete"
         rm -f "$debug_file"
         return 0
     else
         echo -e "${BLUE}--- Claude Output End ---${NC}"
+        echo "--- Claude Output End ---" >> "$LOG_FILE"
         log "Planner phase failed"
         rm -f "$debug_file"
         return 1
@@ -533,6 +531,7 @@ Do NOT work on any other tasks. Focus only on this one."
     fi
 
     echo -e "${BLUE}--- Claude Output Start ---${NC}"
+    echo "--- Claude Output Start ---" >> "$LOG_FILE"
 
     local tmpfile
     tmpfile=$(mktemp)
@@ -551,22 +550,16 @@ Do NOT work on any other tasks. Focus only on this one."
         | awk '/^\{/ { print; fflush() }' \
         | tee "$tmpfile" "$debug_file" \
         | filter_write_edit_content \
-        | jq --unbuffered -rj "$stream_filter"; then
-
-        # Log the final result
-        jq -r 'select(.type == "result").result // empty' "$tmpfile" >> "$LOG_FILE"
+        | jq --unbuffered -rj "$stream_filter" \
+        | tee -a "$LOG_FILE"; then
 
         echo -e "${BLUE}--- Claude Output End ---${NC}"
+        echo "--- Claude Output End ---" >> "$LOG_FILE"
 
         # Display and log context usage
         local usage
         usage=$(get_claude_usage "$tmpfile" "$CLAUDE_CONTEXT_WINDOW")
         display_context_usage "$usage" "$CLAUDE_CONTEXT_WINDOW"
-        if [[ -n "$usage" ]]; then
-            local pct total input output
-            IFS=':' read -r pct total input output <<< "$usage"
-            log "Context usage: ${pct}% (${input} input + ${output} output = ${total} total tokens)"
-        fi
 
         log "Builder phase complete"
         rm -f "$debug_file"
@@ -589,6 +582,7 @@ Do NOT work on any other tasks. Focus only on this one."
         return 0
     else
         echo -e "${BLUE}--- Claude Output End ---${NC}"
+        echo "--- Claude Output End ---" >> "$LOG_FILE"
         log "Builder phase failed"
         rm -f "$debug_file"
         return 1
@@ -649,6 +643,7 @@ Be fair but thorough. Only reject if there are real issues that need fixing."
     log "=== END REVIEWER PROMPT ==="
 
     echo -e "${GREEN}--- Codex Output Start ---${NC}"
+    echo "--- Codex Output Start ---" >> "$LOG_FILE"
 
     local codex_tmpfile
     codex_tmpfile=$(mktemp)
@@ -666,12 +661,14 @@ Be fair but thorough. Only reject if there are real issues that need fixing."
 
         echo ""
         echo -e "${GREEN}--- Codex Output End ---${NC}"
+        echo "--- Codex Output End ---" >> "$LOG_FILE"
 
         log "Reviewer phase complete"
         rm -f "$codex_debug_file"
         return 0
     else
         echo -e "${GREEN}--- Codex Output End ---${NC}"
+        echo "--- Codex Output End ---" >> "$LOG_FILE"
         log "Reviewer phase failed"
         rm -f "$codex_debug_file"
         return 1
