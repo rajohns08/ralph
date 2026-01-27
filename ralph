@@ -190,6 +190,8 @@ usage() {
     echo "Usage: ralph <prompt> <max_iterations>"
     echo "       ralph <max_iterations>              (uses existing .ralph/prompt.txt)"
     echo "       ralph --resume <max_iterations>"
+    echo "       ralph --pre-planned <prompt> <max_iterations>"
+    echo "       ralph --pre-planned <max_iterations>"
     echo "       ralph --status"
     echo ""
     echo "Arguments:"
@@ -198,6 +200,7 @@ usage() {
     echo ""
     echo "Options:"
     echo "  --resume        Resume from existing .ralph/prompt.txt"
+    echo "  --pre-planned   Skip planning phases (requires .ralph/tasks.md to exist)"
     echo "  --status        Show current task status and exit"
     echo ""
     echo "The prompt is stored in .ralph/prompt.txt and can be edited while ralph runs."
@@ -962,6 +965,8 @@ main() {
     local max_iterations=""
     local resume_mode=false
 
+    local pre_planned=false
+
     # Parse arguments
     case "$1" in
         --status)
@@ -979,6 +984,35 @@ main() {
             if [[ -z "$prompt" ]]; then
                 echo -e "${RED}Error: No .ralph/prompt.txt found. Nothing to resume.${NC}"
                 exit 1
+            fi
+            ;;
+        --pre-planned)
+            pre_planned=true
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --pre-planned requires max_iterations"
+                usage
+            fi
+            # Check if tasks.md exists
+            if [[ ! -f "$TASKS_FILE" ]]; then
+                echo -e "${RED}Error: --pre-planned requires $TASKS_FILE to exist.${NC}"
+                echo "Create your task list first, then run with --pre-planned."
+                exit 1
+            fi
+            # Check if arg 2 is a number (max_iterations only) or a prompt
+            if [[ "$2" =~ ^[0-9]+$ ]]; then
+                # Just max_iterations, use existing prompt.txt
+                max_iterations="$2"
+                prompt=$(get_current_prompt)
+                if [[ -z "$prompt" ]]; then
+                    echo -e "${RED}Error: No .ralph/prompt.txt found. Provide a prompt or create .ralph/prompt.txt${NC}"
+                    exit 1
+                fi
+            elif [[ $# -lt 3 ]]; then
+                echo "Error: --pre-planned requires <prompt> <max_iterations> or <max_iterations>"
+                usage
+            else
+                prompt="$2"
+                max_iterations="$3"
             fi
             ;;
         --help|-h)
@@ -1014,8 +1048,14 @@ main() {
     # Record start time for total elapsed tracking
     RALPH_START_TIME=$(date +%s)
 
+    # Handle pre-planned mode - mark planning as complete
+    if [[ "$pre_planned" == true ]]; then
+        save_prompt "$prompt"
+        set_state "plan_reviewed" "true"
+        rm -f "$PLAN_FEEDBACK_FILE"
+        log "Starting Ralph (pre-planned mode - skipping planning phases)"
     # Save prompt to file if starting fresh (not resuming)
-    if [[ "$resume_mode" != true ]]; then
+    elif [[ "$resume_mode" != true ]]; then
         save_prompt "$prompt"
         # Reset plan review state for fresh start
         set_state "plan_reviewed" "false"
