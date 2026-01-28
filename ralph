@@ -462,6 +462,8 @@ Important guidelines for task breakdown:
 - Tasks should be ordered logically (dependencies first)
 - Be specific about what each task should accomplish
 - Include any setup/scaffolding tasks first
+- Keep things as simple as possible while still implementing correctly and following good practices
+- Avoid over-engineering - only plan for what's actually needed
 
 Create the $RALPH_DIR directory if it doesn't exist, then write the tasks file."
 
@@ -549,6 +551,7 @@ Review the plan and evaluate:
 3. TASK DEPENDENCIES: Are tasks ordered correctly? Dependencies should come before dependent tasks.
 4. TASK ORDERING: Is the sequence logical for implementation?
 5. TECHNICAL APPROACH: Are there any concerns about the technical approach implied by the tasks?
+6. SIMPLICITY: Is the plan as simple as possible while still implementing correctly? Flag any over-engineering or unnecessary complexity.
 
 Your response MUST follow one of these two formats:
 
@@ -645,7 +648,8 @@ Instructions:
    - Address any technical concerns
 4. Keep the same markdown format with [ ] for pending tasks
 
-Make thoughtful changes based on the feedback. The goal is a solid, implementable plan."
+Make thoughtful changes based on the feedback. The goal is a solid, implementable plan.
+Keep things as simple as possible while still implementing correctly and following good practices. Avoid over-engineering."
 
     # Log the full prompt
     log "=== PLAN REFINER PROMPT ==="
@@ -735,8 +739,10 @@ Instructions:
 1. Read the task file to understand the full context
 2. Address the reviewer's feedback and fix the issues mentioned
 3. Make the necessary code changes to satisfy the review
-4. Run tests if they exist and fix any failures
-5. When done, update $TASKS_FILE:
+4. Keep things as simple as possible while still implementing correctly and following good practices
+5. Avoid over-engineering - don't add unnecessary abstractions, features, or complexity
+6. Run tests if they exist and fix any failures
+7. When done, update $TASKS_FILE:
    - Change the task from [!] to [R] (ready for review again)
    - Remove or update the rejection comments
 
@@ -763,8 +769,10 @@ Instructions:
 1. Read the task file to understand the full context and see all tasks
 2. Implement ONLY this specific task - do not work on other tasks
 3. Make focused, clean code changes
-4. Run tests if they exist and fix any failures
-5. When done, update $TASKS_FILE:
+4. Keep things as simple as possible while still implementing correctly and following good practices
+5. Avoid over-engineering - don't add unnecessary abstractions, features, or complexity
+6. Run tests if they exist and fix any failures
+7. When done, update $TASKS_FILE:
    - Change YOUR task from [ ] to [R] (ready for review)
 
 Do NOT mark the task as complete [x] - that's the reviewer's job.
@@ -868,7 +876,8 @@ Instructions:
    - Correctly implements what the task describes
    - Follows good coding practices
    - Doesn't introduce obvious bugs or issues
-   - Is simple and well-architected (no over-engineering)
+   - Is as simple as possible while still implementing correctly and following good practices
+   - Is not over-engineered - no unnecessary abstractions, features, or complexity
    - Contains no dead code or unused variables/functions
    - Has no unnecessary duplication (DRY principle)
 
