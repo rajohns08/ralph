@@ -293,9 +293,9 @@ set_state() {
     fi
 }
 
-# Extract only the tasks section (between "## Tasks" and the next "##" or "---")
+# Extract all task lines from the file
 get_tasks_section() {
-    sed -n '/^## Tasks$/,/^##\|^---/p' "$TASKS_FILE" | grep '^\- \['
+    grep '^\- \[' "$TASKS_FILE"
 }
 
 # Show current status
