@@ -39,15 +39,16 @@ cp ralph /usr/local/bin/
 ### Start a new task
 
 ```bash
-ralph "<prompt>" <max_iterations>
+ralph "<prompt>" [max_iterations]
 ```
 
 **Example:**
 ```bash
+ralph "Add user authentication with JWT tokens"
 ralph "Add user authentication with JWT tokens" 10
 ```
 
-This saves the prompt to `.ralph/prompt.txt` for future use.
+The `max_iterations` argument is optional and defaults to 100. This saves the prompt to `.ralph/prompt.txt` for future use.
 
 Alternatively, create `.ralph/prompt.txt` first and run with just the iteration count:
 ```bash
@@ -59,12 +60,53 @@ ralph 10
 ### Resume an existing task
 
 ```bash
-ralph --resume <max_iterations>
+ralph --resume [max_iterations]
 # or simply
-ralph <max_iterations>
+ralph [max_iterations]
 ```
 
-This continues from where you left off, using the existing `.ralph/prompt.txt`.
+This continues from where you left off, using the existing `.ralph/prompt.txt`. Iterations default to 100 if not specified.
+
+### Pre-planned mode
+
+If you want to create the task list yourself (or have Claude create it separately), you can skip the planning phases:
+
+```bash
+ralph --pre-planned [max_iterations]
+ralph --pre-planned "<prompt>" [max_iterations]
+```
+
+**Requirements:**
+- `.ralph/tasks.md` must already exist with your task list
+- `.ralph/prompt.txt` must exist (or provide prompt as argument)
+
+**Example:**
+```bash
+# Create your own task list
+mkdir -p .ralph
+cat > .ralph/tasks.md << 'EOF'
+# Task List
+
+## Tasks
+- [ ] Set up project structure
+- [ ] Add database models
+- [ ] Implement API endpoints
+- [ ] Add tests
+
+## Task Legend
+`[ ]` = Pending
+`[R]` = Ready for review
+`[x]` = Approved/Complete
+`[!]` = Rejected (see comments below task)
+EOF
+
+echo "Build a todo API" > .ralph/prompt.txt
+
+# Run with pre-planned tasks (skips planner and plan review phases)
+ralph --pre-planned
+```
+
+This is useful when you want more control over the task breakdown or when resuming work where you've manually adjusted the tasks.
 
 ### Check status
 
@@ -156,11 +198,12 @@ REVIEWER PHASE - Reviewing Implementation
 
 ## Tips
 
-- **Start small**: Use a reasonable `max_iterations` (5-10) and increase if needed
+- **Start small**: The default is 100 iterations, but you can specify fewer (5-10) if you want to check progress more frequently
 - **Check status**: Use `--status` to see progress before resuming
 - **Review the log**: Check `.ralph/ralph.log` for detailed execution history
 - **Edit tasks manually**: You can edit `.ralph/tasks.md` to add, remove, or reorder tasks
 - **Update prompt dynamically**: Edit `.ralph/prompt.txt` while ralph runs to adjust instructions
+- **Use pre-planned mode**: Use `--pre-planned` when you want to define the task list yourself
 
 ## License
 

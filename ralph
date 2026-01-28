@@ -3,8 +3,8 @@
 set -euo pipefail
 
 # Ralph - Alternating Builder/Reviewer loop using claude and codex
-# Usage: ralph <prompt> <max_iterations>
-#        ralph --resume <max_iterations>
+# Usage: ralph <prompt> [max_iterations]
+#        ralph --resume [max_iterations]
 
 RALPH_DIR=".ralph"
 TASKS_FILE="$RALPH_DIR/tasks.md"
@@ -187,16 +187,16 @@ display_context_usage() {
 
 
 usage() {
-    echo "Usage: ralph <prompt> <max_iterations>"
-    echo "       ralph <max_iterations>              (uses existing .ralph/prompt.txt)"
-    echo "       ralph --resume <max_iterations>"
-    echo "       ralph --pre-planned <prompt> <max_iterations>"
-    echo "       ralph --pre-planned <max_iterations>"
+    echo "Usage: ralph <prompt> [max_iterations]"
+    echo "       ralph [max_iterations]              (uses existing .ralph/prompt.txt)"
+    echo "       ralph --resume [max_iterations]"
+    echo "       ralph --pre-planned <prompt> [max_iterations]"
+    echo "       ralph --pre-planned [max_iterations]"
     echo "       ralph --status"
     echo ""
     echo "Arguments:"
     echo "  prompt          The instructions/goal for the task (saved to .ralph/prompt.txt)"
-    echo "  max_iterations  Maximum number of builder/reviewer cycles"
+    echo "  max_iterations  Maximum number of builder/reviewer cycles (default: 100)"
     echo ""
     echo "Options:"
     echo "  --resume        Resume from existing .ralph/prompt.txt"
@@ -337,7 +337,7 @@ show_status() {
         echo -e "${GREEN}All tasks complete!${NC}"
     else
         echo ""
-        echo -e "Run ${CYAN}ralph --resume <max_iterations>${NC} to continue."
+        echo -e "Run ${CYAN}ralph --resume${NC} to continue."
     fi
 }
 
@@ -957,14 +957,9 @@ determine_next_role() {
 
 # Main execution
 main() {
-    if [[ $# -lt 1 ]]; then
-        usage
-    fi
-
     local prompt=""
-    local max_iterations=""
+    local max_iterations="100"  # Default iterations
     local resume_mode=false
-
     local pre_planned=false
 
     # Parse arguments
@@ -975,11 +970,9 @@ main() {
             ;;
         --resume)
             resume_mode=true
-            if [[ $# -lt 2 ]]; then
-                echo "Error: --resume requires max_iterations"
-                usage
+            if [[ $# -ge 2 ]]; then
+                max_iterations="$2"
             fi
-            max_iterations="$2"
             prompt=$(get_current_prompt)
             if [[ -z "$prompt" ]]; then
                 echo -e "${RED}Error: No .ralph/prompt.txt found. Nothing to resume.${NC}"
@@ -988,18 +981,20 @@ main() {
             ;;
         --pre-planned)
             pre_planned=true
-            if [[ $# -lt 2 ]]; then
-                echo "Error: --pre-planned requires max_iterations"
-                usage
-            fi
             # Check if tasks.md exists
             if [[ ! -f "$TASKS_FILE" ]]; then
                 echo -e "${RED}Error: --pre-planned requires $TASKS_FILE to exist.${NC}"
                 echo "Create your task list first, then run with --pre-planned."
                 exit 1
             fi
-            # Check if arg 2 is a number (max_iterations only) or a prompt
-            if [[ "$2" =~ ^[0-9]+$ ]]; then
+            if [[ $# -lt 2 ]]; then
+                # No additional args, use existing prompt.txt and default iterations
+                prompt=$(get_current_prompt)
+                if [[ -z "$prompt" ]]; then
+                    echo -e "${RED}Error: No .ralph/prompt.txt found. Provide a prompt or create .ralph/prompt.txt${NC}"
+                    exit 1
+                fi
+            elif [[ "$2" =~ ^[0-9]+$ ]]; then
                 # Just max_iterations, use existing prompt.txt
                 max_iterations="$2"
                 prompt=$(get_current_prompt)
@@ -1008,8 +1003,8 @@ main() {
                     exit 1
                 fi
             elif [[ $# -lt 3 ]]; then
-                echo "Error: --pre-planned requires <prompt> <max_iterations> or <max_iterations>"
-                usage
+                # Just prompt, use default iterations
+                prompt="$2"
             else
                 prompt="$2"
                 max_iterations="$3"
@@ -1028,11 +1023,19 @@ main() {
                     exit 1
                 fi
                 resume_mode=true
-            elif [[ $# -lt 2 ]]; then
-                usage
-            else
+            elif [[ $# -eq 1 ]]; then
+                # Single arg that's not a number = prompt with default iterations
+                prompt="$1"
+            elif [[ $# -ge 2 ]]; then
                 prompt="$1"
                 max_iterations="$2"
+            else
+                # No args - try to use existing prompt.txt with default iterations
+                prompt=$(get_current_prompt)
+                if [[ -z "$prompt" ]]; then
+                    usage
+                fi
+                resume_mode=true
             fi
             ;;
     esac
