@@ -3,15 +3,14 @@
 set -euo pipefail
 
 # Ralph - Alternating Builder/Reviewer loop using claude and codex
-# Usage: ralph <prompt> [max_iterations]
-#        ralph --resume [max_iterations]
+# Usage: ralph [prompt] [max_iterations]
+#        ralph --status
 
 RALPH_DIR=".ralph"
 TASKS_FILE="$RALPH_DIR/tasks.md"
 LOG_FILE="$RALPH_DIR/ralph.log"
 STATE_FILE="$RALPH_DIR/state"
 PROMPT_FILE="$RALPH_DIR/prompt.txt"
-PLAN_FEEDBACK_FILE="$RALPH_DIR/plan_feedback.md"
 
 # Colors for output
 RED='\033[0;31m'
@@ -187,11 +186,7 @@ display_context_usage() {
 
 
 usage() {
-    echo "Usage: ralph <prompt> [max_iterations]"
-    echo "       ralph [max_iterations]              (uses existing .ralph/prompt.txt)"
-    echo "       ralph --resume [max_iterations]"
-    echo "       ralph --pre-planned <prompt> [max_iterations]"
-    echo "       ralph --pre-planned [max_iterations]"
+    echo "Usage: ralph [prompt] [max_iterations]"
     echo "       ralph --status"
     echo ""
     echo "Arguments:"
@@ -199,10 +194,9 @@ usage() {
     echo "  max_iterations  Maximum number of builder/reviewer cycles (default: 100)"
     echo ""
     echo "Options:"
-    echo "  --resume        Resume from existing .ralph/prompt.txt"
-    echo "  --pre-planned   Skip planning phases (requires .ralph/tasks.md to exist)"
     echo "  --status        Show current task status and exit"
     echo ""
+    echo "Requires .ralph/tasks.md to exist with a task list."
     echo "The prompt is stored in .ralph/prompt.txt and can be edited while ralph runs."
     echo "Changes take effect on the next iteration."
     exit 1
@@ -247,10 +241,8 @@ init_ralph() {
     if [[ ! -f "$LOG_FILE" ]]; then
         touch "$LOG_FILE"
     fi
-    # State tracks: iteration number and next_role (builder/reviewer)
     if [[ ! -f "$STATE_FILE" ]]; then
         echo "iteration=0" > "$STATE_FILE"
-        echo "next_role=planner" >> "$STATE_FILE"
     fi
 }
 
@@ -300,8 +292,8 @@ get_tasks_section() {
 
 # Show current status
 show_status() {
-    if [[ ! -f "$PROMPT_FILE" ]]; then
-        echo -e "${RED}No .ralph/prompt.txt found. Nothing to resume.${NC}"
+    if [[ ! -f "$TASKS_FILE" ]]; then
+        echo -e "${RED}No .ralph/tasks.md found.${NC}"
         exit 1
     fi
 
@@ -310,9 +302,11 @@ show_status() {
 
     local prompt
     prompt=$(get_current_prompt)
-    echo -e "${YELLOW}Current Prompt:${NC}"
-    echo "$prompt"
-    echo ""
+    if [[ -n "$prompt" ]]; then
+        echo -e "${YELLOW}Current Prompt:${NC}"
+        echo "$prompt"
+        echo ""
+    fi
 
     echo -e "${YELLOW}Tasks:${NC}"
     get_tasks_section
@@ -337,7 +331,7 @@ show_status() {
         echo -e "${GREEN}All tasks complete!${NC}"
     else
         echo ""
-        echo -e "Run ${CYAN}ralph --resume${NC} to continue."
+        echo -e "Run ${CYAN}ralph${NC} to continue."
     fi
 }
 
@@ -393,318 +387,6 @@ get_current_task() {
         echo "$tasks_section" | grep '^\- \[!\]' | head -1 | sed 's/^- \[!\] //'
     else
         echo "$tasks_section" | grep '^\- \[ \]' | head -1 | sed 's/^- \[ \] //'
-    fi
-}
-
-# Check if plan has been reviewed by codex
-plan_needs_review() {
-    # Plan needs review if tasks file exists but plan_reviewed state is not "true"
-    if [[ -f "$TASKS_FILE" ]]; then
-        local reviewed
-        reviewed=$(get_state "plan_reviewed")
-        if [[ "$reviewed" != "true" ]]; then
-            return 0
-        fi
-    fi
-    return 1
-}
-
-# Check if plan feedback exists and needs refinement
-plan_needs_refinement() {
-    if [[ -f "$PLAN_FEEDBACK_FILE" ]]; then
-        # Check if feedback file contains actual feedback (not just approval)
-        local content
-        content=$(cat "$PLAN_FEEDBACK_FILE")
-        if [[ -n "$content" && ! "$content" =~ ^[[:space:]]*PLAN_APPROVED[[:space:]]*$ ]]; then
-            return 0
-        fi
-    fi
-    return 1
-}
-
-# Run the planner phase - claude explores and creates task list
-run_planner() {
-    local prompt="$1"
-
-    log_section "PLANNER PHASE - Creating Task List"
-    local start_time
-    start_time=$(date +%s)
-    log "Launching claude to explore codebase and create task list..."
-
-    local planner_prompt="You are a project planner. Your job is to:
-
-1. Read and understand this prompt: $prompt
-
-2. Explore the current working directory to understand the codebase structure and context.
-
-3. Create a detailed task list breaking down the work into small, focused tasks that won't overload context.
-
-4. Write the task list to $TASKS_FILE in this exact markdown format:
-
-# Task List
-
-## Tasks
-- [ ] Task 1 description
-- [ ] Task 2 description
-- [ ] Task 3 description
-(etc.)
-
-## Task Legend
-\`[ ]\` = Pending
-\`[R]\` = Ready for review
-\`[x]\` = Approved/Complete
-\`[!]\` = Rejected (see comments below task)
-
----
-
-Important guidelines for task breakdown:
-- Each task should be small and focused (completable in one iteration)
-- Tasks should be ordered logically (dependencies first)
-- Be specific about what each task should accomplish
-- Include any setup/scaffolding tasks first
-- Keep things as simple as possible while still implementing correctly and following good practices
-- Avoid over-engineering - only plan for what's actually needed
-
-Create the $RALPH_DIR directory if it doesn't exist, then write the tasks file."
-
-    # Log the full prompt
-    log "=== PLANNER PROMPT ==="
-    echo "$planner_prompt" | tee -a "$LOG_FILE"
-    log "=== END PLANNER PROMPT ==="
-
-    # Run claude with stream-json for real-time output
-    echo -e "${BLUE}--- Claude Output Start ---${NC}"
-    echo "--- Claude Output Start ---" >> "$LOG_FILE"
-
-    local tmpfile
-    tmpfile=$(mktemp)
-    # Also save to debug file for inspection
-    local debug_file="$RALPH_DIR/debug_claude_stream.json"
-    trap "rm -f $tmpfile" RETURN
-
-    local stream_filter
-    stream_filter=$(get_claude_stream_filter "$CLAUDE_CONTEXT_WINDOW")
-
-    if claude --dangerously-skip-permissions \
-        --verbose \
-        --print \
-        --output-format stream-json \
-        --include-partial-messages \
-        -p "$planner_prompt" 2>&1 \
-        | awk '/^\{/ { print; fflush() }' \
-        | tee "$tmpfile" "$debug_file" \
-        | filter_write_edit_content \
-        | jq --unbuffered -rj "$stream_filter" \
-        | tee -a "$LOG_FILE"; then
-
-        echo -e "${BLUE}--- Claude Output End ---${NC}"
-        echo "--- Claude Output End ---" >> "$LOG_FILE"
-
-        # Display and log context usage
-        local usage
-        usage=$(get_claude_usage "$tmpfile" "$CLAUDE_CONTEXT_WINDOW")
-        display_context_usage "$usage" "$CLAUDE_CONTEXT_WINDOW"
-
-        local end_time elapsed_time
-        end_time=$(date +%s)
-        elapsed_time=$((end_time - start_time))
-        log "Planner phase complete (total: $(get_total_elapsed))"
-        rm -f "$debug_file"
-        return 0
-    else
-        echo -e "${BLUE}--- Claude Output End ---${NC}"
-        echo "--- Claude Output End ---" >> "$LOG_FILE"
-        local end_time elapsed_time
-        end_time=$(date +%s)
-        elapsed_time=$((end_time - start_time))
-        log "Planner phase failed (total: $(get_total_elapsed))"
-        rm -f "$debug_file"
-        return 1
-    fi
-}
-
-# Run plan reviewer phase - codex reviews the initial plan
-run_plan_reviewer() {
-    local prompt="$1"
-
-    log_section "PLAN REVIEW PHASE - Codex Reviewing Plan"
-    local start_time
-    start_time=$(date +%s)
-    log "Having Codex review the initial task plan..."
-
-    # Read the current tasks
-    local tasks_content
-    tasks_content=$(cat "$TASKS_FILE")
-
-    local plan_review_prompt="You are a PLAN REVIEWER. Your role is to review and provide feedback on a task plan before implementation begins.
-
-ORIGINAL PROMPT: $prompt
-
-TASK FILE: $TASKS_FILE
-
-CURRENT PLAN:
-$tasks_content
-
-Review the plan and evaluate:
-1. TASK GRANULARITY: Are tasks appropriately sized? Too big risks context overload, too small creates unnecessary overhead.
-2. MISSING TASKS: Are there any tasks that should be added to fully accomplish the goal?
-3. TASK DEPENDENCIES: Are tasks ordered correctly? Dependencies should come before dependent tasks.
-4. TASK ORDERING: Is the sequence logical for implementation?
-5. TECHNICAL APPROACH: Are there any concerns about the technical approach implied by the tasks?
-6. SIMPLICITY: Is the plan as simple as possible while still implementing correctly? Flag any over-engineering or unnecessary complexity.
-
-Your response MUST follow one of these two formats:
-
-IF THE PLAN IS GOOD (no changes needed):
-Write exactly: PLAN_APPROVED
-
-IF THE PLAN NEEDS CHANGES:
-Provide specific, actionable feedback. Be concrete about:
-- Which tasks need to be split, merged, reordered, or removed
-- What tasks are missing and where they should go
-- Any dependency issues
-- Any technical concerns
-
-Write your feedback to $PLAN_FEEDBACK_FILE.
-
-Be constructive but thorough. Only approve if the plan is genuinely ready for implementation."
-
-    # Log the full prompt
-    log "=== PLAN REVIEW PROMPT ==="
-    echo "$plan_review_prompt" | tee -a "$LOG_FILE"
-    log "=== END PLAN REVIEW PROMPT ==="
-
-    echo -e "${GREEN}--- Codex Output Start ---${NC}"
-    echo "--- Codex Output Start ---" >> "$LOG_FILE"
-
-    local codex_tmpfile
-    codex_tmpfile=$(mktemp)
-    local codex_debug_file="$RALPH_DIR/debug_codex_stream.json"
-    trap "rm -f $codex_tmpfile" RETURN
-
-    local stream_filter
-    stream_filter=$(get_codex_stream_filter)
-
-    if echo "$plan_review_prompt" | codex exec --yolo --skip-git-repo-check --json - 2>&1 \
-        | tee "$codex_tmpfile" "$codex_debug_file" \
-        | jq --unbuffered -rj "$stream_filter" \
-        | tee -a "$LOG_FILE"; then
-
-        echo ""
-        echo -e "${GREEN}--- Codex Output End ---${NC}"
-        echo "--- Codex Output End ---" >> "$LOG_FILE"
-
-        # Mark plan as reviewed
-        set_state "plan_reviewed" "true"
-
-        local end_time elapsed_time
-        end_time=$(date +%s)
-        elapsed_time=$((end_time - start_time))
-        log "Plan review phase complete (total: $(get_total_elapsed))"
-        rm -f "$codex_debug_file"
-        return 0
-    else
-        echo -e "${GREEN}--- Codex Output End ---${NC}"
-        echo "--- Codex Output End ---" >> "$LOG_FILE"
-        local end_time elapsed_time
-        end_time=$(date +%s)
-        elapsed_time=$((end_time - start_time))
-        log "Plan review phase failed (total: $(get_total_elapsed))"
-        rm -f "$codex_debug_file"
-        return 1
-    fi
-}
-
-# Run plan refiner phase - claude refines the plan based on codex feedback
-run_plan_refiner() {
-    local prompt="$1"
-
-    log_section "PLAN REFINEMENT PHASE - Claude Refining Plan"
-    local start_time
-    start_time=$(date +%s)
-    log "Having Claude refine the plan based on Codex feedback..."
-
-    # Read the feedback
-    local feedback
-    feedback=$(cat "$PLAN_FEEDBACK_FILE")
-
-    local refiner_prompt="You are a PLAN REFINER. Your role is to improve the task plan based on reviewer feedback.
-
-ORIGINAL PROMPT: $prompt
-
-TASK FILE: $TASKS_FILE
-
-CODEX REVIEWER FEEDBACK:
-$feedback
-
-Instructions:
-1. Read the current task list in $TASKS_FILE
-2. Carefully consider the feedback provided by the reviewer
-3. Update $TASKS_FILE with an improved plan that addresses the feedback:
-   - Split tasks that are too large
-   - Merge tasks that are too granular
-   - Add missing tasks
-   - Reorder tasks if dependencies are wrong
-   - Address any technical concerns
-4. Keep the same markdown format with [ ] for pending tasks
-
-Make thoughtful changes based on the feedback. The goal is a solid, implementable plan.
-Keep things as simple as possible while still implementing correctly and following good practices. Avoid over-engineering."
-
-    # Log the full prompt
-    log "=== PLAN REFINER PROMPT ==="
-    echo "$refiner_prompt" | tee -a "$LOG_FILE"
-    log "=== END PLAN REFINER PROMPT ==="
-
-    echo -e "${BLUE}--- Claude Output Start ---${NC}"
-    echo "--- Claude Output Start ---" >> "$LOG_FILE"
-
-    local tmpfile
-    tmpfile=$(mktemp)
-    local debug_file="$RALPH_DIR/debug_claude_stream.json"
-    trap "rm -f $tmpfile" RETURN
-
-    local stream_filter
-    stream_filter=$(get_claude_stream_filter "$CLAUDE_CONTEXT_WINDOW")
-
-    if claude --dangerously-skip-permissions \
-        --verbose \
-        --print \
-        --output-format stream-json \
-        --include-partial-messages \
-        -p "$refiner_prompt" 2>&1 \
-        | awk '/^\{/ { print; fflush() }' \
-        | tee "$tmpfile" "$debug_file" \
-        | filter_write_edit_content \
-        | jq --unbuffered -rj "$stream_filter" \
-        | tee -a "$LOG_FILE"; then
-
-        echo -e "${BLUE}--- Claude Output End ---${NC}"
-        echo "--- Claude Output End ---" >> "$LOG_FILE"
-
-        # Display and log context usage
-        local usage
-        usage=$(get_claude_usage "$tmpfile" "$CLAUDE_CONTEXT_WINDOW")
-        display_context_usage "$usage" "$CLAUDE_CONTEXT_WINDOW"
-
-        # Clear the feedback file since we've addressed it
-        rm -f "$PLAN_FEEDBACK_FILE"
-
-        local end_time elapsed_time
-        end_time=$(date +%s)
-        elapsed_time=$((end_time - start_time))
-        log "Plan refinement phase complete (total: $(get_total_elapsed))"
-        rm -f "$debug_file"
-        return 0
-    else
-        echo -e "${BLUE}--- Claude Output End ---${NC}"
-        echo "--- Claude Output End ---" >> "$LOG_FILE"
-        local end_time elapsed_time
-        end_time=$(date +%s)
-        elapsed_time=$((end_time - start_time))
-        log "Plan refinement phase failed (total: $(get_total_elapsed))"
-        rm -f "$debug_file"
-        return 1
     fi
 }
 
@@ -947,13 +629,7 @@ Be fair but thorough. Only reject if there are real issues that need fixing."
 
 # Determine next role based on task states
 determine_next_role() {
-    if [[ ! -f "$TASKS_FILE" ]]; then
-        echo "planner"
-    elif plan_needs_review; then
-        echo "plan_reviewer"
-    elif plan_needs_refinement; then
-        echo "plan_refiner"
-    elif has_task_ready_for_review; then
+    if has_task_ready_for_review; then
         echo "reviewer"
     elif has_rejected_task; then
         echo "builder_fix"
@@ -968,86 +644,46 @@ determine_next_role() {
 main() {
     local prompt=""
     local max_iterations="100"  # Default iterations
-    local resume_mode=false
-    local pre_planned=false
 
     # Parse arguments
-    case "$1" in
+    case "${1:-}" in
         --status)
             show_status
             exit 0
-            ;;
-        --resume)
-            resume_mode=true
-            if [[ $# -ge 2 ]]; then
-                max_iterations="$2"
-            fi
-            prompt=$(get_current_prompt)
-            if [[ -z "$prompt" ]]; then
-                echo -e "${RED}Error: No .ralph/prompt.txt found. Nothing to resume.${NC}"
-                exit 1
-            fi
-            ;;
-        --pre-planned)
-            pre_planned=true
-            # Check if tasks.md exists
-            if [[ ! -f "$TASKS_FILE" ]]; then
-                echo -e "${RED}Error: --pre-planned requires $TASKS_FILE to exist.${NC}"
-                echo "Create your task list first, then run with --pre-planned."
-                exit 1
-            fi
-            if [[ $# -lt 2 ]]; then
-                # No additional args, use existing prompt.txt and default iterations
-                prompt=$(get_current_prompt)
-                if [[ -z "$prompt" ]]; then
-                    echo -e "${RED}Error: No .ralph/prompt.txt found. Provide a prompt or create .ralph/prompt.txt${NC}"
-                    exit 1
-                fi
-            elif [[ "$2" =~ ^[0-9]+$ ]]; then
-                # Just max_iterations, use existing prompt.txt
-                max_iterations="$2"
-                prompt=$(get_current_prompt)
-                if [[ -z "$prompt" ]]; then
-                    echo -e "${RED}Error: No .ralph/prompt.txt found. Provide a prompt or create .ralph/prompt.txt${NC}"
-                    exit 1
-                fi
-            elif [[ $# -lt 3 ]]; then
-                # Just prompt, use default iterations
-                prompt="$2"
-            else
-                prompt="$2"
-                max_iterations="$3"
-            fi
             ;;
         --help|-h)
             usage
             ;;
         *)
-            # Check if single arg is a number (max_iterations only, use existing prompt.txt)
-            if [[ $# -eq 1 && "$1" =~ ^[0-9]+$ ]]; then
+            if [[ $# -eq 0 ]]; then
+                # No args - use existing prompt.txt
+                prompt=$(get_current_prompt)
+            elif [[ $# -eq 1 && "$1" =~ ^[0-9]+$ ]]; then
+                # Single number = max_iterations
                 max_iterations="$1"
                 prompt=$(get_current_prompt)
-                if [[ -z "$prompt" ]]; then
-                    echo -e "${RED}Error: No .ralph/prompt.txt found. Provide a prompt or create .ralph/prompt.txt${NC}"
-                    exit 1
-                fi
-                resume_mode=true
             elif [[ $# -eq 1 ]]; then
-                # Single arg that's not a number = prompt with default iterations
+                # Single non-number = prompt
                 prompt="$1"
             elif [[ $# -ge 2 ]]; then
                 prompt="$1"
                 max_iterations="$2"
-            else
-                # No args - try to use existing prompt.txt with default iterations
-                prompt=$(get_current_prompt)
-                if [[ -z "$prompt" ]]; then
-                    usage
-                fi
-                resume_mode=true
             fi
             ;;
     esac
+
+    # Validate requirements
+    if [[ ! -f "$TASKS_FILE" ]]; then
+        echo -e "${RED}Error: $TASKS_FILE not found.${NC}"
+        echo "Create a task list in $TASKS_FILE before running ralph."
+        exit 1
+    fi
+
+    if [[ -z "$prompt" ]]; then
+        echo -e "${RED}Error: No prompt found.${NC}"
+        echo "Provide a prompt as an argument or create $PROMPT_FILE."
+        exit 1
+    fi
 
     # Validate max_iterations is a number
     if ! [[ "$max_iterations" =~ ^[0-9]+$ ]]; then
@@ -1057,25 +693,13 @@ main() {
 
     init_ralph
 
+    # Save prompt to file (allows dynamic updates via file edits)
+    save_prompt "$prompt"
+
     # Record start time for total elapsed tracking
     RALPH_START_TIME=$(date +%s)
 
-    # Handle pre-planned mode - mark planning as complete
-    if [[ "$pre_planned" == true ]]; then
-        save_prompt "$prompt"
-        set_state "plan_reviewed" "true"
-        rm -f "$PLAN_FEEDBACK_FILE"
-        log "Starting Ralph (pre-planned mode - skipping planning phases)"
-    # Save prompt to file if starting fresh (not resuming)
-    elif [[ "$resume_mode" != true ]]; then
-        save_prompt "$prompt"
-        # Reset plan review state for fresh start
-        set_state "plan_reviewed" "false"
-        rm -f "$PLAN_FEEDBACK_FILE"
-        log "Starting Ralph"
-    else
-        log "Resuming Ralph"
-    fi
+    log "Starting Ralph"
     log "Prompt: $prompt"
     log "Max iterations: $max_iterations"
 
@@ -1096,15 +720,6 @@ main() {
         current_prompt=$(get_current_prompt)
 
         case "$next_role" in
-            "planner")
-                run_planner "$current_prompt"
-                ;;
-            "plan_reviewer")
-                run_plan_reviewer "$current_prompt"
-                ;;
-            "plan_refiner")
-                run_plan_refiner "$current_prompt"
-                ;;
             "builder")
                 local task
                 task=$(get_current_task)
@@ -1147,7 +762,7 @@ main() {
     echo "See $TASKS_FILE for current task status."
     echo "See $LOG_FILE for the full log."
     echo ""
-    echo "To continue, run ralph again with the same or different max_iterations."
+    echo "To continue, run ralph again."
 }
 
 main "$@"
