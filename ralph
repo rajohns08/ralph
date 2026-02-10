@@ -89,9 +89,9 @@ then (
   ((.event.message.usage.input_tokens // 0) +
    (.event.message.usage.cache_read_input_tokens // 0) +
    (.event.message.usage.cache_creation_input_tokens // 0)) as $input |
-  ($input * 100 / '"$cw"') | floor as $pct |
-  (if $pct >= 80 then "\u001b[0;31m" elif $pct >= 50 then "\u001b[1;33m" else "\u001b[0;32m" end) as $color |
-  "\n" + $color + "[Context: " + ($pct | tostring) + "% (" + ($input | tostring) + "/'"$cw"' input)]\u001b[0m\n"
+  (100 - ($input * 100 / '"$cw"') | floor) as $pct |
+  (if $pct <= 20 then "\u001b[0;31m" elif $pct <= 50 then "\u001b[1;33m" else "\u001b[0;32m" end) as $color |
+  "\n" + $color + "[Context: " + ($pct | tostring) + "% remaining (" + ($input | tostring) + "/'"$cw"' input)]\u001b[0m\n"
 )
 elif .type=="result"
 then empty  # Result event has cumulative tokens across all turns, not useful for context % display
@@ -157,7 +157,7 @@ get_claude_usage() {
 
     if [[ -n "$input_tokens" && -n "$output_tokens" && "$input_tokens" != "null" && "$input_tokens" != "0" ]]; then
         local total=$((input_tokens + output_tokens))
-        local pct=$((total * 100 / context_window))
+        local pct=$((100 - total * 100 / context_window))
         echo "${pct}:${total}:${input_tokens}:${output_tokens}"
     fi
 }
@@ -172,13 +172,13 @@ display_context_usage() {
         IFS=':' read -r pct total input output <<< "$usage"
 
         local color="${GREEN}"
-        if [[ "$pct" -ge 80 ]]; then
+        if [[ "$pct" -le 20 ]]; then
             color="${RED}"
-        elif [[ "$pct" -ge 50 ]]; then
+        elif [[ "$pct" -le 50 ]]; then
             color="${YELLOW}"
         fi
 
-        local msg="[Context: ${pct}% used (${input} in + ${output} out = ${total}/${context_window} tokens)]"
+        local msg="[Context: ${pct}% remaining (${input} in + ${output} out = ${total}/${context_window} tokens)]"
         echo -e "${color}${msg}${NC}"
         echo "$msg" >> "$LOG_FILE"
     fi
