@@ -11,6 +11,7 @@ TASKS_FILE="$RALPH_DIR/tasks.md"
 LOG_FILE="$RALPH_DIR/ralph.log"
 STATE_FILE="$RALPH_DIR/state"
 PROMPT_FILE="$RALPH_DIR/prompt.txt"
+COLLAB_FILE="$RALPH_DIR/collab.md"
 
 # Colors for output
 RED='\033[0;31m'
@@ -188,6 +189,7 @@ display_context_usage() {
 usage() {
     echo "Usage: ralph [prompt] [max_iterations]"
     echo "       ralph --status"
+    echo "       ralph --collab \"topic to discuss\""
     echo ""
     echo "Arguments:"
     echo "  prompt          The instructions/goal for the task (saved to .ralph/prompt.txt)"
@@ -195,8 +197,11 @@ usage() {
     echo ""
     echo "Options:"
     echo "  --status        Show current task status and exit"
+    echo "  --collab        Start a collaborative discussion between Claude and Codex"
+    echo "                  on the given topic. They converse until reaching agreement,"
+    echo "                  then a summary is printed and saved to .ralph/collab.md."
     echo ""
-    echo "Requires .ralph/tasks.md to exist with a task list."
+    echo "Requires .ralph/tasks.md to exist with a task list (not needed for --collab)."
     echo "The prompt is stored in .ralph/prompt.txt and can be edited while ralph runs."
     echo "Changes take effect on the next iteration."
     exit 1
@@ -640,6 +645,277 @@ determine_next_role() {
     fi
 }
 
+# ============================================
+# Collab Mode - Claude and Codex discuss a topic
+# ============================================
+
+# Initialize collab file with topic
+init_collab() {
+    local topic="$1"
+    mkdir -p "$RALPH_DIR"
+    echo "# Collab: $topic" > "$COLLAB_FILE"
+    echo "" >> "$COLLAB_FILE"
+}
+
+# Run Claude's turn in collab mode
+run_claude_collab_turn() {
+    local topic="$1"
+    local turn_num="$2"
+    local start_time
+    start_time=$(date +%s)
+
+    log_section "CLAUDE - Turn $turn_num"
+
+    local conversation
+    conversation=$(cat "$COLLAB_FILE")
+
+    local collab_prompt="You are participating in a collaborative discussion with another AI (Codex).
+
+TOPIC: $topic
+
+CONVERSATION SO FAR:
+$conversation
+
+Instructions:
+1. Read the conversation above and consider the topic
+2. Provide your thoughts, analysis, and perspective
+3. Respond to any points raised by the other participant
+4. Append your response to $COLLAB_FILE as a new section with the header: ## Claude (Turn $turn_num)
+5. At the very end of your appended section, on its own line, write exactly AGREE if you agree with the current consensus/direction, or DISAGREE if you think more discussion is needed
+
+Your response should be substantive but concise. Focus on reaching agreement."
+
+    log "=== CLAUDE COLLAB PROMPT ==="
+    echo "$collab_prompt" | tee -a "$LOG_FILE"
+    log "=== END CLAUDE COLLAB PROMPT ==="
+
+    echo -e "${BLUE}--- Claude Output Start ---${NC}"
+    echo "--- Claude Output Start ---" >> "$LOG_FILE"
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    local debug_file="$RALPH_DIR/debug_claude_stream.json"
+    trap "rm -f $tmpfile" RETURN
+
+    local stream_filter
+    stream_filter=$(get_claude_stream_filter "$CLAUDE_CONTEXT_WINDOW")
+
+    if claude --dangerously-skip-permissions \
+        --verbose \
+        --print \
+        --output-format stream-json \
+        --include-partial-messages \
+        -p "$collab_prompt" 2>&1 \
+        | awk '/^\{/ { print; fflush() }' \
+        | tee "$tmpfile" "$debug_file" \
+        | filter_write_edit_content \
+        | jq --unbuffered -rj "$stream_filter" \
+        | tee -a "$LOG_FILE"; then
+
+        echo -e "${BLUE}--- Claude Output End ---${NC}"
+        echo "--- Claude Output End ---" >> "$LOG_FILE"
+
+        local usage
+        usage=$(get_claude_usage "$tmpfile" "$CLAUDE_CONTEXT_WINDOW")
+        display_context_usage "$usage" "$CLAUDE_CONTEXT_WINDOW"
+
+        log "Claude turn $turn_num complete (total: $(get_total_elapsed))"
+        rm -f "$debug_file"
+        return 0
+    else
+        echo -e "${BLUE}--- Claude Output End ---${NC}"
+        echo "--- Claude Output End ---" >> "$LOG_FILE"
+        log "Claude turn $turn_num failed (total: $(get_total_elapsed))"
+        rm -f "$debug_file"
+        return 1
+    fi
+}
+
+# Run Codex's turn in collab mode
+run_codex_collab_turn() {
+    local topic="$1"
+    local turn_num="$2"
+    local start_time
+    start_time=$(date +%s)
+
+    log_section "CODEX - Turn $turn_num"
+
+    local conversation
+    conversation=$(cat "$COLLAB_FILE")
+
+    local collab_prompt="You are participating in a collaborative discussion with another AI (Claude).
+
+TOPIC: $topic
+
+CONVERSATION SO FAR:
+$conversation
+
+Instructions:
+1. Read the conversation above and consider the topic
+2. Provide your thoughts, analysis, and perspective
+3. Respond to any points raised by the other participant
+4. Append your response to $COLLAB_FILE as a new section with the header: ## Codex (Turn $turn_num)
+5. At the very end of your appended section, on its own line, write exactly AGREE if you agree with the current consensus/direction, or DISAGREE if you think more discussion is needed
+
+Your response should be substantive but concise. Focus on reaching agreement."
+
+    log "=== CODEX COLLAB PROMPT ==="
+    echo "$collab_prompt" | tee -a "$LOG_FILE"
+    log "=== END CODEX COLLAB PROMPT ==="
+
+    echo -e "${GREEN}--- Codex Output Start ---${NC}"
+    echo "--- Codex Output Start ---" >> "$LOG_FILE"
+
+    local codex_tmpfile
+    codex_tmpfile=$(mktemp)
+    local codex_debug_file="$RALPH_DIR/debug_codex_stream.json"
+    trap "rm -f $codex_tmpfile" RETURN
+
+    local stream_filter
+    stream_filter=$(get_codex_stream_filter)
+
+    if echo "$collab_prompt" | codex exec --yolo --skip-git-repo-check --json - 2>&1 \
+        | tee "$codex_tmpfile" "$codex_debug_file" \
+        | jq --unbuffered -rj "$stream_filter" \
+        | tee -a "$LOG_FILE"; then
+
+        echo ""
+        echo -e "${GREEN}--- Codex Output End ---${NC}"
+        echo "--- Codex Output End ---" >> "$LOG_FILE"
+
+        log "Codex turn $turn_num complete (total: $(get_total_elapsed))"
+        rm -f "$codex_debug_file"
+        return 0
+    else
+        echo -e "${GREEN}--- Codex Output End ---${NC}"
+        echo "--- Codex Output End ---" >> "$LOG_FILE"
+        log "Codex turn $turn_num failed (total: $(get_total_elapsed))"
+        rm -f "$codex_debug_file"
+        return 1
+    fi
+}
+
+# Check if the last two sections in the collab file both end with AGREE
+check_collab_agreement() {
+    local last_two_verdicts
+    last_two_verdicts=$(awk '
+        /^## (Claude|Codex)/ {
+            if (verdict != "") { print verdict; verdict="" }
+        }
+        /^AGREE$/ { verdict="AGREE" }
+        /^DISAGREE$/ { verdict="DISAGREE" }
+        END { if (verdict != "") print verdict }
+    ' "$COLLAB_FILE" | tail -2)
+
+    local count
+    count=$(echo "$last_two_verdicts" | wc -l | tr -d ' ')
+
+    if [[ "$count" -ge 2 ]]; then
+        local agrees
+        agrees=$(echo "$last_two_verdicts" | grep -c "^AGREE$" || true)
+        if [[ "$agrees" -eq 2 ]]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Generate final summary after agreement
+run_collab_summary() {
+    local topic="$1"
+
+    log_section "GENERATING SUMMARY"
+
+    local conversation
+    conversation=$(cat "$COLLAB_FILE")
+
+    local summary_prompt="You just participated in a collaborative discussion. Here is the full conversation:
+
+$conversation
+
+Instructions:
+1. Write a concise summary of what was agreed upon
+2. Append it to $COLLAB_FILE as a new section with the header: ## Summary
+3. The summary should capture the key points of agreement and any important nuances
+4. Keep it focused and actionable"
+
+    echo -e "${BLUE}--- Summary Generation Start ---${NC}"
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    local debug_file="$RALPH_DIR/debug_claude_stream.json"
+    trap "rm -f $tmpfile" RETURN
+
+    local stream_filter
+    stream_filter=$(get_claude_stream_filter "$CLAUDE_CONTEXT_WINDOW")
+
+    claude --dangerously-skip-permissions \
+        --verbose \
+        --print \
+        --output-format stream-json \
+        --include-partial-messages \
+        -p "$summary_prompt" 2>&1 \
+        | awk '/^\{/ { print; fflush() }' \
+        | tee "$tmpfile" "$debug_file" \
+        | filter_write_edit_content \
+        | jq --unbuffered -rj "$stream_filter" \
+        | tee -a "$LOG_FILE" || true
+
+    echo -e "${BLUE}--- Summary Generation End ---${NC}"
+    rm -f "$debug_file"
+
+    # Print the summary section from the collab file
+    echo ""
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}FINAL AGREED SUMMARY${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    awk '/^## Summary/{found=1} found{print}' "$COLLAB_FILE"
+    echo -e "${GREEN}========================================${NC}"
+    echo ""
+    echo -e "Full conversation saved to ${CYAN}$COLLAB_FILE${NC}"
+}
+
+# Main collab loop
+run_collab() {
+    local topic="$1"
+    local max_rounds=10
+
+    init_ralph
+    init_collab "$topic"
+
+    RALPH_START_TIME=$(date +%s)
+
+    log "Starting Collab Mode"
+    log "Topic: $topic"
+    log "Max rounds: $max_rounds"
+
+    local turn=0
+
+    while [[ $turn -lt $((max_rounds * 2)) ]]; do
+        turn=$((turn + 1))
+
+        if [[ $((turn % 2)) -eq 1 ]]; then
+            local claude_turn_num=$(( (turn + 1) / 2 ))
+            run_claude_collab_turn "$topic" "$claude_turn_num"
+        else
+            local codex_turn_num=$((turn / 2))
+            run_codex_collab_turn "$topic" "$codex_turn_num"
+        fi
+
+        # Check for agreement after at least 2 turns
+        if [[ $turn -ge 2 ]] && check_collab_agreement; then
+            log "Both agents have reached agreement!"
+            run_collab_summary "$topic"
+            exit 0
+        fi
+    done
+
+    log_section "MAX COLLAB ROUNDS REACHED"
+    log "Reached maximum rounds ($max_rounds). Generating summary of current state."
+    run_collab_summary "$topic"
+    exit 0
+}
+
 # Main execution
 main() {
     local prompt=""
@@ -653,6 +929,15 @@ main() {
             ;;
         --help|-h)
             usage
+            ;;
+        --collab)
+            shift
+            if [[ $# -lt 1 ]]; then
+                echo -e "${RED}Error: --collab requires a topic argument.${NC}"
+                echo "Usage: ralph --collab \"topic to discuss\""
+                exit 1
+            fi
+            run_collab "$1"
             ;;
         *)
             if [[ $# -eq 0 ]]; then
