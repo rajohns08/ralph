@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+trap 'kill 0' INT
 
 # Ralph - Alternating Builder/Reviewer loop using claude and codex
 # Usage: ralph [prompt] [max_iterations]
