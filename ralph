@@ -606,7 +606,7 @@ Be fair but thorough. Only reject if there are real issues that need fixing."
     stream_filter=$(get_codex_stream_filter)
 
     # Run with --json to capture usage, display text and context inline
-    if echo "$reviewer_prompt" | codex exec --yolo --skip-git-repo-check --json - 2>&1 \
+    if echo "$reviewer_prompt" | codex exec --yolo --skip-git-repo-check --json - 2>>"$LOG_FILE" \
         | tee "$codex_tmpfile" "$codex_debug_file" \
         | jq --unbuffered -rj "$stream_filter" \
         | tee -a "$LOG_FILE"; then
@@ -775,7 +775,7 @@ Your response should be substantive but concise. Focus on reaching agreement."
     local stream_filter
     stream_filter=$(get_codex_stream_filter)
 
-    if echo "$collab_prompt" | codex exec --yolo --skip-git-repo-check --json - 2>&1 \
+    if echo "$collab_prompt" | codex exec --yolo --skip-git-repo-check --json - 2>>"$LOG_FILE" \
         | tee "$codex_tmpfile" "$codex_debug_file" \
         | jq --unbuffered -rj "$stream_filter" \
         | tee -a "$LOG_FILE"; then
