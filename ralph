@@ -933,12 +933,17 @@ main() {
             ;;
         --collab)
             shift
-            if [[ $# -lt 1 ]]; then
-                echo -e "${RED}Error: --collab requires a topic argument.${NC}"
+            local collab_topic="${1:-}"
+            if [[ -z "$collab_topic" ]]; then
+                collab_topic=$(get_current_prompt)
+            fi
+            if [[ -z "$collab_topic" ]]; then
+                echo -e "${RED}Error: No topic provided.${NC}"
                 echo "Usage: ralph --collab \"topic to discuss\""
+                echo "Or create $PROMPT_FILE with the topic."
                 exit 1
             fi
-            run_collab "$1"
+            run_collab "$collab_topic"
             ;;
         *)
             if [[ $# -eq 0 ]]; then
