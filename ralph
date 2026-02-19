@@ -191,6 +191,7 @@ usage() {
     echo "Usage: ralph [prompt] [max_iterations]"
     echo "       ralph --status"
     echo "       ralph --collab \"topic to discuss\""
+    echo "       ralph --fix-issue \"description of the issue\""
     echo ""
     echo "Arguments:"
     echo "  prompt          The instructions/goal for the task (saved to .ralph/prompt.txt)"
@@ -201,8 +202,11 @@ usage() {
     echo "  --collab        Start a collaborative discussion between Claude and Codex"
     echo "                  on the given topic. They converse until reaching agreement,"
     echo "                  then a summary is printed and saved to .ralph/collab.md."
+    echo "  --fix-issue     Discuss the issue via collab (Claude + Codex), then"
+    echo "                  automatically run the builder/reviewer loop to implement"
+    echo "                  the agreed-upon fix. Combines --collab and standard mode."
     echo ""
-    echo "Requires .ralph/tasks.md to exist with a task list (not needed for --collab)."
+    echo "Requires .ralph/tasks.md to exist with a task list (not needed for --collab/--fix-issue)."
     echo "The prompt is stored in .ralph/prompt.txt and can be edited while ralph runs."
     echo "Changes take effect on the next iteration."
     exit 1
@@ -291,9 +295,9 @@ set_state() {
     fi
 }
 
-# Extract all task lines from the file
+# Extract task lines from the ## Tasks section only
 get_tasks_section() {
-    grep '^\- \[' "$TASKS_FILE"
+    awk '/^## Tasks/{found=1; next} found && /^## /{exit} found && /^\- \[/{print}' "$TASKS_FILE"
 }
 
 # Show current status
@@ -907,14 +911,87 @@ run_collab() {
         if [[ $turn -ge 2 ]] && check_collab_agreement; then
             log "Both agents have reached agreement!"
             run_collab_summary "$topic"
-            exit 0
+            return 0
         fi
     done
 
     log_section "MAX COLLAB ROUNDS REACHED"
     log "Reached maximum rounds ($max_rounds). Generating summary of current state."
     run_collab_summary "$topic"
-    exit 0
+    return 0
+}
+
+# Fix Issue Mode - Collab then Builder/Reviewer loop
+run_fix_issue() {
+    local topic="$1"
+    local max_iterations=100
+
+    init_ralph
+
+    # Record start time for total elapsed tracking
+    RALPH_START_TIME=$(date +%s)
+
+    # Phase 1: Collab to discuss the issue
+    run_collab "$topic"
+
+    # Phase 2: Set up tasks.md from collab summary and run builder/reviewer loop
+    local summary
+    summary=$(awk '/^## Summary/{found=1} found{print}' "$COLLAB_FILE")
+
+    cat > "$TASKS_FILE" << EOF
+# Fix Issue: $topic
+
+## Context
+$summary
+
+## Tasks
+- [ ] Implement the fix as described in the summary above
+EOF
+
+    local fix_prompt="Fix this issue: $topic
+
+The approach was discussed and agreed upon by Claude and Codex. See .ralph/collab.md for the full discussion and .ralph/tasks.md for the summary and task."
+
+    save_prompt "$fix_prompt"
+
+    log ""
+    log_section "COLLAB COMPLETE - STARTING IMPLEMENTATION"
+    log "Tasks created in $TASKS_FILE"
+
+    # Phase 2: Standard builder/reviewer loop
+    local iteration=0
+    while [[ $iteration -lt $max_iterations ]]; do
+        iteration=$((iteration + 1))
+        set_state "iteration" "$iteration"
+
+        local next_role
+        next_role=$(determine_next_role)
+
+        local current_prompt
+        current_prompt=$(get_current_prompt)
+
+        case "$next_role" in
+            "builder"|"builder_fix")
+                local task
+                task=$(get_current_task)
+                local is_fix="false"
+                [[ "$next_role" == "builder_fix" ]] && is_fix="true"
+                run_builder "$current_prompt" "$task" "$is_fix"
+                ;;
+            "reviewer")
+                local task
+                task=$(get_current_task)
+                run_reviewer "$current_prompt" "$task"
+                ;;
+            "done")
+                log_section "FIX COMPLETE"
+                echo -e "${GREEN}Issue fix implemented and approved!${NC}"
+                exit 0
+                ;;
+        esac
+    done
+
+    echo -e "${YELLOW}Reached max iterations during fix implementation.${NC}"
 }
 
 # Main execution
@@ -944,6 +1021,22 @@ main() {
                 exit 1
             fi
             run_collab "$collab_topic"
+            exit 0
+            ;;
+        --fix-issue)
+            shift
+            local issue_topic="${1:-}"
+            if [[ -z "$issue_topic" ]]; then
+                issue_topic=$(get_current_prompt)
+            fi
+            if [[ -z "$issue_topic" ]]; then
+                echo -e "${RED}Error: No issue provided.${NC}"
+                echo "Usage: ralph --fix-issue \"description of the issue\""
+                echo "Or create $PROMPT_FILE with the issue."
+                exit 1
+            fi
+            run_fix_issue "$issue_topic"
+            exit 0
             ;;
         *)
             if [[ $# -eq 0 ]]; then

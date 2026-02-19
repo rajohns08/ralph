@@ -92,6 +92,27 @@ ralph --status
 
 Shows the current task list and progress summary.
 
+### Collab mode
+
+```bash
+ralph --collab "topic to discuss"
+```
+
+Starts a collaborative discussion between Claude and Codex on the given topic. They take turns until both agree, then a summary is generated and saved to `.ralph/collab.md`.
+
+### Fix issue mode
+
+```bash
+ralph --fix-issue "description of the issue"
+```
+
+Combines collab and the standard builder/reviewer loop:
+
+1. **Phase 1 (Collab):** Claude and Codex discuss the issue and agree on an approach
+2. **Phase 2 (Build):** Automatically creates a task from the collab summary and runs the builder/reviewer loop to implement the fix
+
+This is useful when you want the two models to discuss a problem before implementing a solution, without running `--collab` and standard mode separately.
+
 ### Dynamic Prompt Updates
 
 The prompt is stored in `.ralph/prompt.txt` and is **re-read on every iteration**. This means you can edit the prompt file while Ralph is running, and your changes will take effect on the next iteration.
@@ -124,6 +145,7 @@ Ralph uses a `.ralph/` directory containing:
 
 - `prompt.txt` - The current prompt (editable while running)
 - `tasks.md` - The task list with status markers
+- `collab.md` - Collab discussion transcript and summary (created by `--collab` and `--fix-issue`)
 - `ralph.log` - Full execution log
 - `state` - Internal state tracking
 
