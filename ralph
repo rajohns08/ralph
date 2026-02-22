@@ -295,9 +295,17 @@ set_state() {
     fi
 }
 
-# Extract task lines from the ## Tasks section only
+# Extract task lines from the tasks file
+# Tries ## Tasks section first, then falls back to all task lines in the file
 get_tasks_section() {
-    awk '/^## Tasks/{found=1; next} found && /^## /{exit} found && /^\- \[/{print}' "$TASKS_FILE"
+    local result
+    result=$(awk '/^## Tasks/{found=1; next} found && /^## /{exit} found && /^\- \[/{print}' "$TASKS_FILE")
+    if [[ -n "$result" ]]; then
+        echo "$result"
+    else
+        # No ## Tasks section found - extract all task lines from the file
+        awk '/^\- \[/{print}' "$TASKS_FILE"
+    fi
 }
 
 # Show current status
