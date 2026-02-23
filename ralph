@@ -855,9 +855,9 @@ Instructions:
 
 Your response should be substantive but concise. Focus on reaching agreement."
 
-    log "=== ${tool_name^^} COLLAB PROMPT ==="
+    log "=== ${tool_name} COLLAB PROMPT ==="
     echo "$collab_prompt" | tee -a "$LOG_FILE"
-    log "=== END ${tool_name^^} COLLAB PROMPT ==="
+    log "=== END ${tool_name} COLLAB PROMPT ==="
 
     echo -e "${tool_color}--- ${label} Output Start ---${NC}"
     echo "--- ${label} Output Start ---" >> "$LOG_FILE"
