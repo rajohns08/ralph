@@ -14,6 +14,7 @@ STATE_FILE="$RALPH_DIR/state"
 PROMPT_FILE="$RALPH_DIR/prompt.txt"
 COLLAB_FILE="$RALPH_DIR/collab.md"
 CONFIG_FILE="$RALPH_DIR/config"
+GLOBAL_CONFIG_FILE="$HOME/.ralph/config"
 
 # Tool configuration (defaults, can be overridden by config file and CLI args)
 BUILDER_TOOL="claude"
@@ -221,12 +222,16 @@ usage() {
     echo "Supported tools: claude, codex, gemini, copilot"
     echo ""
     echo "Configuration:"
-    echo "  Tools can be configured via .ralph/config (key=value format):"
+    echo "  Tools can be configured via config files (key=value format):"
     echo "    builder=claude"
     echo "    reviewer=codex"
     echo "  Extra args after the tool name are passed to the command:"
     echo "    builder=copilot --model gpt-5.2-codex"
-    echo "  CLI flags (--builder, --reviewer) override config file values."
+    echo ""
+    echo "  Config files (later overrides earlier, per-key):"
+    echo "    ~/.ralph/config     Global defaults (apply to all projects)"
+    echo "    .ralph/config       Project-specific overrides"
+    echo "    CLI flags           --builder, --reviewer (highest priority)"
     echo ""
     echo "Requires .ralph/tasks.md to exist with a task list (not needed for --collab/--fix-issue)."
     echo "The prompt is stored in .ralph/prompt.txt and can be edited while ralph runs."
@@ -278,25 +283,34 @@ init_ralph() {
     fi
 }
 
-# Load tool configuration from config file
-load_config() {
-    if [[ -f "$CONFIG_FILE" ]]; then
+# Load tool configuration from a single config file
+_load_config_file() {
+    local file="$1"
+    if [[ -f "$file" ]]; then
         local val
-        val=$(grep "^builder=" "$CONFIG_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)
+        val=$(grep "^builder=" "$file" 2>/dev/null | tail -1 | cut -d'=' -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)
         if [[ -n "$val" ]]; then
             BUILDER_TOOL="${val%% *}"
+            BUILDER_USER_ARGS=""
             if [[ "$val" == *" "* ]]; then
                 BUILDER_USER_ARGS="${val#* }"
             fi
         fi
-        val=$(grep "^reviewer=" "$CONFIG_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)
+        val=$(grep "^reviewer=" "$file" 2>/dev/null | tail -1 | cut -d'=' -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)
         if [[ -n "$val" ]]; then
             REVIEWER_TOOL="${val%% *}"
+            REVIEWER_USER_ARGS=""
             if [[ "$val" == *" "* ]]; then
                 REVIEWER_USER_ARGS="${val#* }"
             fi
         fi
     fi
+}
+
+# Load tool configuration: global (~/.ralph/config) then project (.ralph/config)
+load_config() {
+    _load_config_file "$GLOBAL_CONFIG_FILE"
+    _load_config_file "$CONFIG_FILE"
 }
 
 # Validate tool name

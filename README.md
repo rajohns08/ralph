@@ -92,9 +92,9 @@ The `max_iterations` argument is optional and defaults to 100.
 
 ### Configuring tools
 
-By default, Ralph uses Claude as the builder and Codex as the reviewer. You can change this with CLI flags or a config file.
+By default, Ralph uses Claude as the builder and Codex as the reviewer. You can change this with CLI flags or config files.
 
-**CLI flags** (override config file):
+**CLI flags** (highest priority):
 ```bash
 ralph --builder=gemini --reviewer=claude
 ralph --collab --builder=copilot --reviewer=gemini "topic"
@@ -103,17 +103,25 @@ ralph --collab --builder=copilot --reviewer=gemini "topic"
 ralph --builder="copilot --model gpt-5.2-codex" --reviewer="copilot --model gpt-5.2"
 ```
 
-**Config file** (`.ralph/config`):
+**Global config** (`~/.ralph/config`) — defaults for all projects:
+```
+builder=copilot --model gpt-5.2-codex
+reviewer=copilot --model gpt-5.2
+```
+
+**Project config** (`.ralph/config`) — overrides global per-key:
 ```
 builder=claude
 reviewer=codex
 ```
 
-Extra arguments after the tool name are passed to the command:
-```
-builder=copilot --model gpt-5.2-codex
-reviewer=copilot --model gpt-5.2
-```
+Extra arguments after the tool name are passed to the command.
+
+**Precedence** (later overrides earlier, per-key):
+1. Defaults (builder=claude, reviewer=codex)
+2. `~/.ralph/config` (global)
+3. `.ralph/config` (project)
+4. CLI flags (`--builder`, `--reviewer`)
 
 Supported tools: `claude`, `codex`, `gemini`, `copilot`
 
@@ -182,11 +190,13 @@ The prompt is stored in `.ralph/prompt.txt` and is **re-read on every iteration*
     [!] -> [R]         [R] -> [!] (rejected)
 ```
 
-### Files Created
+### Files
 
-Ralph uses a `.ralph/` directory containing:
+**Global** (`~/.ralph/`):
+- `config` - Global tool defaults (apply to all projects)
 
-- `config` - Tool configuration (builder/reviewer selection)
+**Project** (`.ralph/`):
+- `config` - Project-specific tool configuration (overrides global)
 - `prompt.txt` - The current prompt (editable while running)
 - `tasks.md` - The task list with status markers
 - `collab.md` - Collab discussion transcript and summary (created by `--collab` and `--fix-issue`)
