@@ -670,16 +670,43 @@ Do NOT work on any other tasks. Focus only on this one."
         # Commit the changes with a brief message
         if git rev-parse --is-inside-work-tree &>/dev/null; then
             log "Committing changes..."
-            local commit_msg
-            if [[ "$is_fix" == "true" ]]; then
-                commit_msg="fix: $task"
-            else
-                commit_msg="$task"
+            git add -A -- ':!.ralph'
+
+            local diff_summary commit_msg
+            diff_summary=$(git diff --cached --stat 2>/dev/null)
+
+            if [[ -n "$diff_summary" ]]; then
+                local commit_prompt="Write a single-line git commit message (max 72 chars) summarizing these changes like a human developer would. Output ONLY the message, no quotes, no markdown, no explanation.
+
+Task: $task
+
+Files changed:
+$diff_summary"
+
+                # Generate commit message using the builder tool
+                case "$tool" in
+                    claude)
+                        commit_msg=$(claude --print --model claude-haiku-4-5-20251001 -p "$commit_prompt" 2>/dev/null | head -1)
+                        ;;
+                    codex)
+                        commit_msg=$(echo "$commit_prompt" | codex exec - 2>/dev/null | tail -1)
+                        ;;
+                    gemini)
+                        commit_msg=$(gemini -p "$commit_prompt" 2>/dev/null | tail -1)
+                        ;;
+                    copilot)
+                        commit_msg=$(copilot -p "$commit_prompt" 2>/dev/null | tail -1)
+                        ;;
+                esac
+
+                # Fallback to task description if generation failed
+                if [[ -z "$commit_msg" ]]; then
+                    commit_msg=$(echo "$task" | head -1)
+                fi
+
+                git commit -m "$commit_msg" >> "$LOG_FILE" 2>&1 || true
+                log "Committed: $commit_msg"
             fi
-            # Keep to single line
-            commit_msg=$(echo "$commit_msg" | head -1)
-            git add -A -- ':!.ralph' && git commit -m "$commit_msg" >> "$LOG_FILE" 2>&1 || true
-            log "Committed: $commit_msg"
         fi
 
         return 0
