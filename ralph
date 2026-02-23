@@ -678,7 +678,7 @@ Do NOT work on any other tasks. Focus only on this one."
             fi
             # Keep to single line
             commit_msg=$(echo "$commit_msg" | head -1)
-            git add -A && git commit -m "$commit_msg" >> "$LOG_FILE" 2>&1 || true
+            git add -A -- ':!.ralph' && git commit -m "$commit_msg" >> "$LOG_FILE" 2>&1 || true
             log "Committed: $commit_msg"
         fi
 
