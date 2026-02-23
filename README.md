@@ -1,23 +1,26 @@
 # Ralph
 
-An automated builder/reviewer loop that uses Claude for implementation and Codex for code review.
+An automated builder/reviewer loop that uses configurable AI tools for implementation and code review.
 
 ## Overview
 
 Ralph takes a user-provided task list and iteratively implements and reviews each task:
 
-1. **Builder** (Claude) - Implements one task at a time
-2. **Reviewer** (Codex) - Reviews the implementation and approves or rejects with feedback
+1. **Builder** (default: Claude) - Implements one task at a time
+2. **Reviewer** (default: Codex) - Reviews the implementation and approves or rejects with feedback
 3. If rejected, the builder addresses feedback and resubmits
 
 This continues until all tasks are complete or the maximum iterations are reached.
 
 ## Requirements
 
-- [Claude CLI](https://github.com/anthropics/claude-code) (`claude`)
-- [Codex CLI](https://github.com/openai/codex) (`codex`)
 - Bash
 - Git (optional, for automatic commits)
+- At least one supported AI tool:
+  - [Claude CLI](https://github.com/anthropics/claude-code) (`claude`) - default builder
+  - [Codex CLI](https://github.com/openai/codex) (`codex`) - default reviewer
+  - [Gemini CLI](https://github.com/google-gemini/gemini-cli) (`gemini`)
+  - [GitHub Copilot CLI](https://github.com/github/gh-copilot) (`copilot`)
 
 ## Installation
 
@@ -64,7 +67,7 @@ echo "Build a todo API" > .ralph/prompt.txt
 ### Run
 
 ```bash
-ralph [prompt] [max_iterations]
+ralph [options] [prompt] [max_iterations]
 ```
 
 **Examples:**
@@ -80,9 +83,49 @@ ralph 10
 
 # Provide prompt and max iterations
 ralph "Build a todo API" 10
+
+# Use Gemini as builder and Copilot as reviewer
+ralph --builder=gemini --reviewer=copilot "Build a todo API"
 ```
 
 The `max_iterations` argument is optional and defaults to 100.
+
+### Configuring tools
+
+By default, Ralph uses Claude as the builder and Codex as the reviewer. You can change this with CLI flags or a config file.
+
+**CLI flags** (override config file):
+```bash
+ralph --builder=gemini --reviewer=claude
+ralph --collab --builder=copilot --reviewer=gemini "topic"
+
+# Extra arguments are passed to the tool command after its system flags:
+ralph --builder="copilot --model gpt-5.2-codex" --reviewer="copilot --model gpt-5.2"
+```
+
+**Config file** (`.ralph/config`):
+```
+builder=claude
+reviewer=codex
+```
+
+Extra arguments after the tool name are passed to the command:
+```
+builder=copilot --model gpt-5.2-codex
+reviewer=copilot --model gpt-5.2
+```
+
+Supported tools: `claude`, `codex`, `gemini`, `copilot`
+
+Each tool is launched with appropriate flags:
+| Tool | Command |
+|------|---------|
+| Claude | `claude --dangerously-skip-permissions --verbose --print --output-format stream-json --include-partial-messages` |
+| Codex | `codex exec --yolo --skip-git-repo-check --json` |
+| Gemini | `gemini --yolo` |
+| Copilot | `copilot --allow-all-tools` |
+
+The builder tool is also used for collab turn 1 (odd turns) and collab summary generation. The reviewer tool is used for collab turn 2 (even turns).
 
 ### Check status
 
@@ -98,7 +141,7 @@ Shows the current task list and progress summary.
 ralph --collab "topic to discuss"
 ```
 
-Starts a collaborative discussion between Claude and Codex on the given topic. They take turns until both agree, then a summary is generated and saved to `.ralph/collab.md`.
+Starts a collaborative discussion between the builder and reviewer tools on the given topic. They take turns until both agree, then a summary is generated and saved to `.ralph/collab.md`.
 
 ### Fix issue mode
 
@@ -108,7 +151,7 @@ ralph --fix-issue "description of the issue"
 
 Combines collab and the standard builder/reviewer loop:
 
-1. **Phase 1 (Collab):** Claude and Codex discuss the issue and agree on an approach
+1. **Phase 1 (Collab):** Builder and reviewer tools discuss the issue and agree on an approach
 2. **Phase 2 (Build):** Automatically creates a task from the collab summary and runs the builder/reviewer loop to implement the fix
 
 This is useful when you want the two models to discuss a problem before implementing a solution, without running `--collab` and standard mode separately.
@@ -133,7 +176,7 @@ The prompt is stored in `.ralph/prompt.txt` and is **re-read on every iteration*
 ```
 ┌─────────────┐     ┌─────────────┐
 │   Builder   │────>│  Reviewer   │
-│  (Claude)   │<────│   (Codex)   │
+│ (configurable) │<────│ (configurable) │
 └─────────────┘     └─────────────┘
     [ ] -> [R]         [R] -> [x] (approved)
     [!] -> [R]         [R] -> [!] (rejected)
@@ -143,6 +186,7 @@ The prompt is stored in `.ralph/prompt.txt` and is **re-read on every iteration*
 
 Ralph uses a `.ralph/` directory containing:
 
+- `config` - Tool configuration (builder/reviewer selection)
 - `prompt.txt` - The current prompt (editable while running)
 - `tasks.md` - The task list with status markers
 - `collab.md` - Collab discussion transcript and summary (created by `--collab` and `--fix-issue`)

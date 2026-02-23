@@ -3,7 +3,7 @@
 set -euo pipefail
 trap 'kill 0' INT
 
-# Ralph - Alternating Builder/Reviewer loop using claude and codex
+# Ralph - Alternating Builder/Reviewer loop
 # Usage: ralph [prompt] [max_iterations]
 #        ralph --status
 
@@ -13,6 +13,13 @@ LOG_FILE="$RALPH_DIR/ralph.log"
 STATE_FILE="$RALPH_DIR/state"
 PROMPT_FILE="$RALPH_DIR/prompt.txt"
 COLLAB_FILE="$RALPH_DIR/collab.md"
+CONFIG_FILE="$RALPH_DIR/config"
+
+# Tool configuration (defaults, can be overridden by config file and CLI args)
+BUILDER_TOOL="claude"
+REVIEWER_TOOL="codex"
+BUILDER_USER_ARGS=""
+REVIEWER_USER_ARGS=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -188,7 +195,7 @@ display_context_usage() {
 
 
 usage() {
-    echo "Usage: ralph [prompt] [max_iterations]"
+    echo "Usage: ralph [options] [prompt] [max_iterations]"
     echo "       ralph --status"
     echo "       ralph --collab \"topic to discuss\""
     echo "       ralph --fix-issue \"description of the issue\""
@@ -198,13 +205,28 @@ usage() {
     echo "  max_iterations  Maximum number of builder/reviewer cycles (default: 100)"
     echo ""
     echo "Options:"
-    echo "  --status        Show current task status and exit"
-    echo "  --collab        Start a collaborative discussion between Claude and Codex"
-    echo "                  on the given topic. They converse until reaching agreement,"
-    echo "                  then a summary is printed and saved to .ralph/collab.md."
-    echo "  --fix-issue     Discuss the issue via collab (Claude + Codex), then"
-    echo "                  automatically run the builder/reviewer loop to implement"
-    echo "                  the agreed-upon fix. Combines --collab and standard mode."
+    echo "  --status            Show current task status and exit"
+    echo "  --builder=<tool>    Set the builder tool (default: claude)"
+    echo "  --reviewer=<tool>   Set the reviewer tool (default: codex)"
+    echo "                      Extra args are passed to the tool command, e.g.:"
+    echo "                        --builder=\"copilot --model gpt-5.2-codex\""
+    echo "  --collab            Start a collaborative discussion between builder and"
+    echo "                      reviewer tools on the given topic. They converse until"
+    echo "                      reaching agreement, then a summary is printed and saved"
+    echo "                      to .ralph/collab.md."
+    echo "  --fix-issue         Discuss the issue via collab, then automatically run the"
+    echo "                      builder/reviewer loop to implement the agreed-upon fix."
+    echo "                      Combines --collab and standard mode."
+    echo ""
+    echo "Supported tools: claude, codex, gemini, copilot"
+    echo ""
+    echo "Configuration:"
+    echo "  Tools can be configured via .ralph/config (key=value format):"
+    echo "    builder=claude"
+    echo "    reviewer=codex"
+    echo "  Extra args after the tool name are passed to the command:"
+    echo "    builder=copilot --model gpt-5.2-codex"
+    echo "  CLI flags (--builder, --reviewer) override config file values."
     echo ""
     echo "Requires .ralph/tasks.md to exist with a task list (not needed for --collab/--fix-issue)."
     echo "The prompt is stored in .ralph/prompt.txt and can be edited while ralph runs."
@@ -253,6 +275,123 @@ init_ralph() {
     fi
     if [[ ! -f "$STATE_FILE" ]]; then
         echo "iteration=0" > "$STATE_FILE"
+    fi
+}
+
+# Load tool configuration from config file
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        local val
+        val=$(grep "^builder=" "$CONFIG_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)
+        if [[ -n "$val" ]]; then
+            BUILDER_TOOL="${val%% *}"
+            if [[ "$val" == *" "* ]]; then
+                BUILDER_USER_ARGS="${val#* }"
+            fi
+        fi
+        val=$(grep "^reviewer=" "$CONFIG_FILE" 2>/dev/null | tail -1 | cut -d'=' -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)
+        if [[ -n "$val" ]]; then
+            REVIEWER_TOOL="${val%% *}"
+            if [[ "$val" == *" "* ]]; then
+                REVIEWER_USER_ARGS="${val#* }"
+            fi
+        fi
+    fi
+}
+
+# Validate tool name
+validate_tool() {
+    local tool="$1"
+    case "$tool" in
+        claude|codex|gemini|copilot) return 0 ;;
+        *)
+            echo -e "${RED}Error: Unknown tool '$tool'. Valid tools: claude, codex, gemini, copilot${NC}"
+            exit 1
+            ;;
+    esac
+}
+
+# Get display name for a tool
+get_tool_display_name() {
+    case "$1" in
+        claude) echo "Claude" ;;
+        codex) echo "Codex" ;;
+        gemini) echo "Gemini" ;;
+        copilot) echo "Copilot" ;;
+    esac
+}
+
+# Get display color for a tool
+get_tool_color() {
+    case "$1" in
+        claude) echo "$BLUE" ;;
+        codex) echo "$GREEN" ;;
+        gemini) echo "$YELLOW" ;;
+        copilot) echo "$CYAN" ;;
+    esac
+}
+
+# Run a tool and stream its output
+# Args: tool_name, prompt, tmpfile, debug_file, user_args
+# Returns: exit code of the tool
+run_tool_exec() {
+    local tool="$1"
+    local prompt="$2"
+    local tmpfile="$3"
+    local debug_file="$4"
+    local user_args="${5:-}"
+
+    case "$tool" in
+        claude)
+            local stream_filter
+            stream_filter=$(get_claude_stream_filter "$CLAUDE_CONTEXT_WINDOW")
+            # shellcheck disable=SC2086
+            claude --dangerously-skip-permissions \
+                --verbose \
+                --print \
+                --output-format stream-json \
+                --include-partial-messages \
+                $user_args \
+                -p "$prompt" 2>&1 \
+                | awk '/^\{/ { print; fflush() }' \
+                | tee "$tmpfile" "$debug_file" \
+                | filter_write_edit_content \
+                | jq --unbuffered -rj "$stream_filter" \
+                | tee -a "$LOG_FILE"
+            ;;
+        codex)
+            local stream_filter
+            stream_filter=$(get_codex_stream_filter)
+            # shellcheck disable=SC2086
+            echo "$prompt" | codex exec --yolo --skip-git-repo-check --json $user_args - 2>>"$LOG_FILE" \
+                | tee "$tmpfile" "$debug_file" \
+                | jq --unbuffered -rj "$stream_filter" \
+                | tee -a "$LOG_FILE"
+            ;;
+        gemini)
+            # shellcheck disable=SC2086
+            gemini --yolo $user_args -p "$prompt" 2>&1 \
+                | tee "$tmpfile" "$debug_file" \
+                | tee -a "$LOG_FILE"
+            ;;
+        copilot)
+            # shellcheck disable=SC2086
+            copilot --allow-all-tools $user_args -p "$prompt" 2>&1 \
+                | tee "$tmpfile" "$debug_file" \
+                | tee -a "$LOG_FILE"
+            ;;
+    esac
+}
+
+# Display context usage if supported by the tool
+display_tool_usage() {
+    local tool="$1"
+    local tmpfile="$2"
+
+    if [[ "$tool" == "claude" ]]; then
+        local usage
+        usage=$(get_claude_usage "$tmpfile" "$CLAUDE_CONTEXT_WINDOW")
+        display_context_usage "$usage" "$CLAUDE_CONTEXT_WINDOW"
     fi
 }
 
@@ -408,7 +547,7 @@ get_current_task() {
     fi
 }
 
-# Run builder phase - claude implements the next task
+# Run builder phase - implements the next task using the configured builder tool
 run_builder() {
     local prompt="$1"
     local task="$2"
@@ -416,8 +555,14 @@ run_builder() {
     local start_time
     start_time=$(date +%s)
 
+    local tool="$BUILDER_TOOL"
+    local tool_name
+    tool_name=$(get_tool_display_name "$tool")
+    local tool_color
+    tool_color=$(get_tool_color "$tool")
+
     if [[ "$is_fix" == "true" ]]; then
-        log_section "BUILDER PHASE - Fixing Rejected Task"
+        log_section "BUILDER PHASE ($tool_name) - Fixing Rejected Task"
         log "Task to fix: $task"
 
         # Get rejection comments (lines after the rejected task until next task or section)
@@ -454,7 +599,7 @@ Do NOT work on any other tasks. Focus only on fixing this one task based on feed
         log "=== END BUILDER (FIX) PROMPT ==="
 
     else
-        log_section "BUILDER PHASE - Implementing Next Task"
+        log_section "BUILDER PHASE ($tool_name) - Implementing Next Task"
         log "Task to implement: $task"
 
         local builder_prompt="You are a BUILDER. Your role is to implement code changes.
@@ -485,36 +630,22 @@ Do NOT work on any other tasks. Focus only on this one."
 
     fi
 
-    echo -e "${BLUE}--- Claude Output Start ---${NC}"
-    echo "--- Claude Output Start ---" >> "$LOG_FILE"
+    echo -e "${tool_color}--- ${tool_name} Output Start ---${NC}"
+    echo "--- ${tool_name} Output Start ---" >> "$LOG_FILE"
 
     local tmpfile
     tmpfile=$(mktemp)
-    local debug_file="$RALPH_DIR/debug_claude_stream.json"
+    local debug_file="$RALPH_DIR/debug_${tool}_stream.json"
     trap "rm -f $tmpfile" RETURN
 
-    local stream_filter
-    stream_filter=$(get_claude_stream_filter "$CLAUDE_CONTEXT_WINDOW")
+    if run_tool_exec "$tool" "$builder_prompt" "$tmpfile" "$debug_file" "$BUILDER_USER_ARGS"; then
 
-    if claude --dangerously-skip-permissions \
-        --verbose \
-        --print \
-        --output-format stream-json \
-        --include-partial-messages \
-        -p "$builder_prompt" 2>&1 \
-        | awk '/^\{/ { print; fflush() }' \
-        | tee "$tmpfile" "$debug_file" \
-        | filter_write_edit_content \
-        | jq --unbuffered -rj "$stream_filter" \
-        | tee -a "$LOG_FILE"; then
-
-        echo -e "${BLUE}--- Claude Output End ---${NC}"
-        echo "--- Claude Output End ---" >> "$LOG_FILE"
+        echo ""
+        echo -e "${tool_color}--- ${tool_name} Output End ---${NC}"
+        echo "--- ${tool_name} Output End ---" >> "$LOG_FILE"
 
         # Display and log context usage
-        local usage
-        usage=$(get_claude_usage "$tmpfile" "$CLAUDE_CONTEXT_WINDOW")
-        display_context_usage "$usage" "$CLAUDE_CONTEXT_WINDOW"
+        display_tool_usage "$tool" "$tmpfile"
 
         local end_time elapsed_time
         end_time=$(date +%s)
@@ -539,8 +670,9 @@ Do NOT work on any other tasks. Focus only on this one."
 
         return 0
     else
-        echo -e "${BLUE}--- Claude Output End ---${NC}"
-        echo "--- Claude Output End ---" >> "$LOG_FILE"
+        echo ""
+        echo -e "${tool_color}--- ${tool_name} Output End ---${NC}"
+        echo "--- ${tool_name} Output End ---" >> "$LOG_FILE"
         local end_time elapsed_time
         end_time=$(date +%s)
         elapsed_time=$((end_time - start_time))
@@ -550,12 +682,18 @@ Do NOT work on any other tasks. Focus only on this one."
     fi
 }
 
-# Run reviewer phase - codex reviews the implementation
+# Run reviewer phase - reviews the implementation using the configured reviewer tool
 run_reviewer() {
     local prompt="$1"
     local task="$2"
 
-    log_section "REVIEWER PHASE - Reviewing Implementation"
+    local tool="$REVIEWER_TOOL"
+    local tool_name
+    tool_name=$(get_tool_display_name "$tool")
+    local tool_color
+    tool_color=$(get_tool_color "$tool")
+
+    log_section "REVIEWER PHASE ($tool_name) - Reviewing Implementation"
     local start_time
     start_time=$(date +%s)
     log "Task under review: $task"
@@ -606,41 +744,37 @@ Be fair but thorough. Only reject if there are real issues that need fixing."
     echo "$reviewer_prompt" | tee -a "$LOG_FILE"
     log "=== END REVIEWER PROMPT ==="
 
-    echo -e "${GREEN}--- Codex Output Start ---${NC}"
-    echo "--- Codex Output Start ---" >> "$LOG_FILE"
+    echo -e "${tool_color}--- ${tool_name} Output Start ---${NC}"
+    echo "--- ${tool_name} Output Start ---" >> "$LOG_FILE"
 
-    local codex_tmpfile
-    codex_tmpfile=$(mktemp)
-    local codex_debug_file="$RALPH_DIR/debug_codex_stream.json"
-    trap "rm -f $codex_tmpfile" RETURN
+    local tmpfile
+    tmpfile=$(mktemp)
+    local debug_file="$RALPH_DIR/debug_${tool}_stream.json"
+    trap "rm -f $tmpfile" RETURN
 
-    local stream_filter
-    stream_filter=$(get_codex_stream_filter)
-
-    # Run with --json to capture usage, display text and context inline
-    if echo "$reviewer_prompt" | codex exec --yolo --skip-git-repo-check --json - 2>>"$LOG_FILE" \
-        | tee "$codex_tmpfile" "$codex_debug_file" \
-        | jq --unbuffered -rj "$stream_filter" \
-        | tee -a "$LOG_FILE"; then
+    if run_tool_exec "$tool" "$reviewer_prompt" "$tmpfile" "$debug_file" "$REVIEWER_USER_ARGS"; then
 
         echo ""
-        echo -e "${GREEN}--- Codex Output End ---${NC}"
-        echo "--- Codex Output End ---" >> "$LOG_FILE"
+        echo -e "${tool_color}--- ${tool_name} Output End ---${NC}"
+        echo "--- ${tool_name} Output End ---" >> "$LOG_FILE"
+
+        display_tool_usage "$tool" "$tmpfile"
 
         local end_time elapsed_time
         end_time=$(date +%s)
         elapsed_time=$((end_time - start_time))
         log "Reviewer phase complete (total: $(get_total_elapsed))"
-        rm -f "$codex_debug_file"
+        rm -f "$debug_file"
         return 0
     else
-        echo -e "${GREEN}--- Codex Output End ---${NC}"
-        echo "--- Codex Output End ---" >> "$LOG_FILE"
+        echo ""
+        echo -e "${tool_color}--- ${tool_name} Output End ---${NC}"
+        echo "--- ${tool_name} Output End ---" >> "$LOG_FILE"
         local end_time elapsed_time
         end_time=$(date +%s)
         elapsed_time=$((end_time - start_time))
         log "Reviewer phase failed (total: $(get_total_elapsed))"
-        rm -f "$codex_debug_file"
+        rm -f "$debug_file"
         return 1
     fi
 }
@@ -659,7 +793,7 @@ determine_next_role() {
 }
 
 # ============================================
-# Collab Mode - Claude and Codex discuss a topic
+# Collab Mode - Two tools discuss a topic
 # ============================================
 
 # Initialize collab file with topic
@@ -670,19 +804,42 @@ init_collab() {
     echo "" >> "$COLLAB_FILE"
 }
 
-# Run Claude's turn in collab mode
-run_claude_collab_turn() {
-    local topic="$1"
-    local turn_num="$2"
+# Run a collab turn for any tool
+run_collab_turn() {
+    local tool="$1"
+    local topic="$2"
+    local turn_num="$3"
+    local user_args="${4:-}"
+    local role="${5:-}"
+
+    local tool_name
+    tool_name=$(get_tool_display_name "$tool")
+    local tool_color
+    tool_color=$(get_tool_color "$tool")
+
+    # Build label: "Builder (Copilot)" or just "Copilot" if no role given
+    local label="$tool_name"
+    if [[ -n "$role" ]]; then
+        label="$role ($tool_name)"
+    fi
+
+    # Determine the other participant's label
+    local other_label
+    if [[ "$role" == "Builder" ]]; then
+        other_label="Reviewer ($(get_tool_display_name "$REVIEWER_TOOL"))"
+    else
+        other_label="Builder ($(get_tool_display_name "$BUILDER_TOOL"))"
+    fi
+
     local start_time
     start_time=$(date +%s)
 
-    log_section "CLAUDE - Turn $turn_num"
+    log_section "${label} - Turn $turn_num"
 
     local conversation
     conversation=$(cat "$COLLAB_FILE")
 
-    local collab_prompt="You are participating in a collaborative discussion with another AI (Codex).
+    local collab_prompt="You are the $role, participating in a collaborative discussion with $other_label.
 
 TOPIC: $topic
 
@@ -693,117 +850,40 @@ Instructions:
 1. Read the conversation above and consider the topic
 2. Provide your thoughts, analysis, and perspective
 3. Respond to any points raised by the other participant
-4. Append your response to $COLLAB_FILE as a new section with the header: ## Claude (Turn $turn_num)
+4. Append your response to $COLLAB_FILE as a new section with the header: ## $label (Turn $turn_num)
 5. At the very end of your appended section, on its own line, write exactly AGREE if you agree with the current consensus/direction, or DISAGREE if you think more discussion is needed
 
 Your response should be substantive but concise. Focus on reaching agreement."
 
-    log "=== CLAUDE COLLAB PROMPT ==="
+    log "=== ${tool_name^^} COLLAB PROMPT ==="
     echo "$collab_prompt" | tee -a "$LOG_FILE"
-    log "=== END CLAUDE COLLAB PROMPT ==="
+    log "=== END ${tool_name^^} COLLAB PROMPT ==="
 
-    echo -e "${BLUE}--- Claude Output Start ---${NC}"
-    echo "--- Claude Output Start ---" >> "$LOG_FILE"
+    echo -e "${tool_color}--- ${label} Output Start ---${NC}"
+    echo "--- ${label} Output Start ---" >> "$LOG_FILE"
 
     local tmpfile
     tmpfile=$(mktemp)
-    local debug_file="$RALPH_DIR/debug_claude_stream.json"
+    local debug_file="$RALPH_DIR/debug_${tool}_stream.json"
     trap "rm -f $tmpfile" RETURN
 
-    local stream_filter
-    stream_filter=$(get_claude_stream_filter "$CLAUDE_CONTEXT_WINDOW")
-
-    if claude --dangerously-skip-permissions \
-        --verbose \
-        --print \
-        --output-format stream-json \
-        --include-partial-messages \
-        -p "$collab_prompt" 2>&1 \
-        | awk '/^\{/ { print; fflush() }' \
-        | tee "$tmpfile" "$debug_file" \
-        | filter_write_edit_content \
-        | jq --unbuffered -rj "$stream_filter" \
-        | tee -a "$LOG_FILE"; then
-
-        echo -e "${BLUE}--- Claude Output End ---${NC}"
-        echo "--- Claude Output End ---" >> "$LOG_FILE"
-
-        local usage
-        usage=$(get_claude_usage "$tmpfile" "$CLAUDE_CONTEXT_WINDOW")
-        display_context_usage "$usage" "$CLAUDE_CONTEXT_WINDOW"
-
-        log "Claude turn $turn_num complete (total: $(get_total_elapsed))"
-        rm -f "$debug_file"
-        return 0
-    else
-        echo -e "${BLUE}--- Claude Output End ---${NC}"
-        echo "--- Claude Output End ---" >> "$LOG_FILE"
-        log "Claude turn $turn_num failed (total: $(get_total_elapsed))"
-        rm -f "$debug_file"
-        return 1
-    fi
-}
-
-# Run Codex's turn in collab mode
-run_codex_collab_turn() {
-    local topic="$1"
-    local turn_num="$2"
-    local start_time
-    start_time=$(date +%s)
-
-    log_section "CODEX - Turn $turn_num"
-
-    local conversation
-    conversation=$(cat "$COLLAB_FILE")
-
-    local collab_prompt="You are participating in a collaborative discussion with another AI (Claude).
-
-TOPIC: $topic
-
-CONVERSATION SO FAR:
-$conversation
-
-Instructions:
-1. Read the conversation above and consider the topic
-2. Provide your thoughts, analysis, and perspective
-3. Respond to any points raised by the other participant
-4. Append your response to $COLLAB_FILE as a new section with the header: ## Codex (Turn $turn_num)
-5. At the very end of your appended section, on its own line, write exactly AGREE if you agree with the current consensus/direction, or DISAGREE if you think more discussion is needed
-
-Your response should be substantive but concise. Focus on reaching agreement."
-
-    log "=== CODEX COLLAB PROMPT ==="
-    echo "$collab_prompt" | tee -a "$LOG_FILE"
-    log "=== END CODEX COLLAB PROMPT ==="
-
-    echo -e "${GREEN}--- Codex Output Start ---${NC}"
-    echo "--- Codex Output Start ---" >> "$LOG_FILE"
-
-    local codex_tmpfile
-    codex_tmpfile=$(mktemp)
-    local codex_debug_file="$RALPH_DIR/debug_codex_stream.json"
-    trap "rm -f $codex_tmpfile" RETURN
-
-    local stream_filter
-    stream_filter=$(get_codex_stream_filter)
-
-    if echo "$collab_prompt" | codex exec --yolo --skip-git-repo-check --json - 2>>"$LOG_FILE" \
-        | tee "$codex_tmpfile" "$codex_debug_file" \
-        | jq --unbuffered -rj "$stream_filter" \
-        | tee -a "$LOG_FILE"; then
+    if run_tool_exec "$tool" "$collab_prompt" "$tmpfile" "$debug_file" "$user_args"; then
 
         echo ""
-        echo -e "${GREEN}--- Codex Output End ---${NC}"
-        echo "--- Codex Output End ---" >> "$LOG_FILE"
+        echo -e "${tool_color}--- ${label} Output End ---${NC}"
+        echo "--- ${label} Output End ---" >> "$LOG_FILE"
 
-        log "Codex turn $turn_num complete (total: $(get_total_elapsed))"
-        rm -f "$codex_debug_file"
+        display_tool_usage "$tool" "$tmpfile"
+
+        log "${label} turn $turn_num complete (total: $(get_total_elapsed))"
+        rm -f "$debug_file"
         return 0
     else
-        echo -e "${GREEN}--- Codex Output End ---${NC}"
-        echo "--- Codex Output End ---" >> "$LOG_FILE"
-        log "Codex turn $turn_num failed (total: $(get_total_elapsed))"
-        rm -f "$codex_debug_file"
+        echo ""
+        echo -e "${tool_color}--- ${label} Output End ---${NC}"
+        echo "--- ${label} Output End ---" >> "$LOG_FILE"
+        log "${label} turn $turn_num failed (total: $(get_total_elapsed))"
+        rm -f "$debug_file"
         return 1
     fi
 }
@@ -812,7 +892,7 @@ Your response should be substantive but concise. Focus on reaching agreement."
 check_collab_agreement() {
     local last_two_verdicts
     last_two_verdicts=$(awk '
-        /^## (Claude|Codex)/ {
+        /^## (Builder|Reviewer) / {
             if (verdict != "") { print verdict; verdict="" }
         }
         /^AGREE$/ { verdict="AGREE" }
@@ -833,11 +913,17 @@ check_collab_agreement() {
     return 1
 }
 
-# Generate final summary after agreement
+# Generate final summary after agreement using the builder tool
 run_collab_summary() {
     local topic="$1"
 
-    log_section "GENERATING SUMMARY"
+    local tool="$BUILDER_TOOL"
+    local tool_name
+    tool_name=$(get_tool_display_name "$tool")
+    local tool_color
+    tool_color=$(get_tool_color "$tool")
+
+    log_section "GENERATING SUMMARY ($tool_name)"
 
     local conversation
     conversation=$(cat "$COLLAB_FILE")
@@ -852,29 +938,16 @@ Instructions:
 3. The summary should capture the key points of agreement and any important nuances
 4. Keep it focused and actionable"
 
-    echo -e "${BLUE}--- Summary Generation Start ---${NC}"
+    echo -e "${tool_color}--- Summary Generation Start ---${NC}"
 
     local tmpfile
     tmpfile=$(mktemp)
-    local debug_file="$RALPH_DIR/debug_claude_stream.json"
+    local debug_file="$RALPH_DIR/debug_${tool}_stream.json"
     trap "rm -f $tmpfile" RETURN
 
-    local stream_filter
-    stream_filter=$(get_claude_stream_filter "$CLAUDE_CONTEXT_WINDOW")
+    run_tool_exec "$tool" "$summary_prompt" "$tmpfile" "$debug_file" "$BUILDER_USER_ARGS" || true
 
-    claude --dangerously-skip-permissions \
-        --verbose \
-        --print \
-        --output-format stream-json \
-        --include-partial-messages \
-        -p "$summary_prompt" 2>&1 \
-        | awk '/^\{/ { print; fflush() }' \
-        | tee "$tmpfile" "$debug_file" \
-        | filter_write_edit_content \
-        | jq --unbuffered -rj "$stream_filter" \
-        | tee -a "$LOG_FILE" || true
-
-    echo -e "${BLUE}--- Summary Generation End ---${NC}"
+    echo -e "${tool_color}--- Summary Generation End ---${NC}"
     rm -f "$debug_file"
 
     # Print the summary section from the collab file
@@ -896,10 +969,17 @@ run_collab() {
     init_ralph
     init_collab "$topic"
 
+    local builder_name
+    builder_name=$(get_tool_display_name "$BUILDER_TOOL")
+    local reviewer_name
+    reviewer_name=$(get_tool_display_name "$REVIEWER_TOOL")
+
     RALPH_START_TIME=$(date +%s)
 
     log "Starting Collab Mode"
     log "Topic: $topic"
+    log "Turn 1 tool: $builder_name"
+    log "Turn 2 tool: $reviewer_name"
     log "Max rounds: $max_rounds"
 
     local turn=0
@@ -908,11 +988,11 @@ run_collab() {
         turn=$((turn + 1))
 
         if [[ $((turn % 2)) -eq 1 ]]; then
-            local claude_turn_num=$(( (turn + 1) / 2 ))
-            run_claude_collab_turn "$topic" "$claude_turn_num"
+            local turn_num=$(( (turn + 1) / 2 ))
+            run_collab_turn "$BUILDER_TOOL" "$topic" "$turn_num" "$BUILDER_USER_ARGS" "Builder"
         else
-            local codex_turn_num=$((turn / 2))
-            run_codex_collab_turn "$topic" "$codex_turn_num"
+            local turn_num=$((turn / 2))
+            run_collab_turn "$REVIEWER_TOOL" "$topic" "$turn_num" "$REVIEWER_USER_ARGS" "Reviewer"
         fi
 
         # Check for agreement after at least 2 turns
@@ -946,6 +1026,11 @@ run_fix_issue() {
     local summary
     summary=$(awk '/^## Summary/{found=1} found{print}' "$COLLAB_FILE")
 
+    local builder_name
+    builder_name=$(get_tool_display_name "$BUILDER_TOOL")
+    local reviewer_name
+    reviewer_name=$(get_tool_display_name "$REVIEWER_TOOL")
+
     cat > "$TASKS_FILE" << EOF
 # Fix Issue: $topic
 
@@ -958,7 +1043,7 @@ EOF
 
     local fix_prompt="Fix this issue: $topic
 
-The approach was discussed and agreed upon by Claude and Codex. See .ralph/collab.md for the full discussion and .ralph/tasks.md for the summary and task."
+The approach was discussed and agreed upon by $builder_name and $reviewer_name. See .ralph/collab.md for the full discussion and .ralph/tasks.md for the summary and task."
 
     save_prompt "$fix_prompt"
 
@@ -1006,8 +1091,51 @@ The approach was discussed and agreed upon by Claude and Codex. See .ralph/colla
 main() {
     local prompt=""
     local max_iterations="100"  # Default iterations
+    local cli_builder=""
+    local cli_builder_args=""
+    local cli_reviewer=""
+    local cli_reviewer_args=""
 
-    # Parse arguments
+    # Extract --builder and --reviewer flags from all arguments
+    local args=()
+    for arg in "$@"; do
+        case "$arg" in
+            --builder=*)
+                local spec="${arg#--builder=}"
+                cli_builder="${spec%% *}"
+                if [[ "$spec" == *" "* ]]; then
+                    cli_builder_args="${spec#* }"
+                fi
+                ;;
+            --reviewer=*)
+                local spec="${arg#--reviewer=}"
+                cli_reviewer="${spec%% *}"
+                if [[ "$spec" == *" "* ]]; then
+                    cli_reviewer_args="${spec#* }"
+                fi
+                ;;
+            *)
+                args+=("$arg")
+                ;;
+        esac
+    done
+
+    # Load config file defaults, then override with CLI args
+    load_config
+    if [[ -n "$cli_builder" ]]; then
+        BUILDER_TOOL="$cli_builder"
+        BUILDER_USER_ARGS="$cli_builder_args"
+    fi
+    if [[ -n "$cli_reviewer" ]]; then
+        REVIEWER_TOOL="$cli_reviewer"
+        REVIEWER_USER_ARGS="$cli_reviewer_args"
+    fi
+    validate_tool "$BUILDER_TOOL"
+    validate_tool "$REVIEWER_TOOL"
+
+    # Parse remaining arguments
+    set -- "${args[@]+"${args[@]}"}"
+
     case "${1:-}" in
         --status)
             show_status
@@ -1091,7 +1219,14 @@ main() {
     # Record start time for total elapsed tracking
     RALPH_START_TIME=$(date +%s)
 
+    local builder_name
+    builder_name=$(get_tool_display_name "$BUILDER_TOOL")
+    local reviewer_name
+    reviewer_name=$(get_tool_display_name "$REVIEWER_TOOL")
+
     log "Starting Ralph"
+    log "Builder: $builder_name"
+    log "Reviewer: $reviewer_name"
     log "Prompt: $prompt"
     log "Max iterations: $max_iterations"
 
