@@ -670,7 +670,7 @@ Do NOT work on any other tasks. Focus only on this one."
         # Commit the changes with a brief message
         if git rev-parse --is-inside-work-tree &>/dev/null; then
             log "Committing changes..."
-            git add -A -- ':!.ralph'
+            git add -A -- ':!.ralph' 2>/dev/null || true
 
             local diff_summary commit_msg
             diff_summary=$(git diff --cached --stat 2>/dev/null)
