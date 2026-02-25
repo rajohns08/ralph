@@ -684,23 +684,27 @@ Files changed:
 $diff_summary"
 
                 # Generate commit message using the builder tool
+                # Each line has || true to prevent set -euo pipefail from exiting the
+                # script if the tool fails (e.g. API error, timeout, broken pipe from head/tail).
+                # Failures fall through to the fallback below.
                 case "$tool" in
                     claude)
-                        commit_msg=$(claude --print --model claude-haiku-4-5-20251001 -p "$commit_prompt" 2>/dev/null | head -1)
+                        commit_msg=$(claude --print --model claude-haiku-4-5-20251001 -p "$commit_prompt" 2>/dev/null | head -1) || true
                         ;;
                     codex)
-                        commit_msg=$(echo "$commit_prompt" | codex exec - 2>/dev/null | tail -1)
+                        commit_msg=$(echo "$commit_prompt" | codex exec - 2>/dev/null | tail -1) || true
                         ;;
                     gemini)
-                        commit_msg=$(gemini -p "$commit_prompt" 2>/dev/null | tail -1)
+                        commit_msg=$(gemini -p "$commit_prompt" 2>/dev/null | tail -1) || true
                         ;;
                     copilot)
-                        commit_msg=$(copilot -p "$commit_prompt" 2>/dev/null | tail -1)
+                        commit_msg=$(copilot -p "$commit_prompt" 2>/dev/null | tail -1) || true
                         ;;
                 esac
 
                 # Fallback to task description if generation failed
                 if [[ -z "$commit_msg" ]]; then
+                    log "Warning: commit message generation via '$tool' failed or returned empty, falling back to task description"
                     commit_msg=$(echo "$task" | head -1)
                 fi
 
