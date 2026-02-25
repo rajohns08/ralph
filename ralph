@@ -13,6 +13,7 @@ LOG_FILE="$RALPH_DIR/ralph.log"
 STATE_FILE="$RALPH_DIR/state"
 PROMPT_FILE="$RALPH_DIR/prompt.txt"
 COLLAB_FILE="$RALPH_DIR/collab.md"
+DEEP_REVIEW_FILE="$RALPH_DIR/deep-review.md"
 CONFIG_FILE="$RALPH_DIR/config"
 GLOBAL_CONFIG_FILE="$HOME/.ralph/config"
 
@@ -200,6 +201,7 @@ usage() {
     echo "       ralph --status"
     echo "       ralph --collab \"topic to discuss\""
     echo "       ralph --fix-issue \"description of the issue\""
+    echo "       ralph --deep-review \"review feature-branch relative to main\""
     echo ""
     echo "Arguments:"
     echo "  prompt          The instructions/goal for the task (saved to .ralph/prompt.txt)"
@@ -218,6 +220,11 @@ usage() {
     echo "  --fix-issue         Discuss the issue via collab, then automatically run the"
     echo "                      builder/reviewer loop to implement the agreed-upon fix."
     echo "                      Combines --collab and standard mode."
+    echo "  --deep-review       Two-phase code review. First, builder and reviewer collab"
+    echo "                      to produce a review checklist sized to fit context. Then"
+    echo "                      both tools independently review each item, writing notes"
+    echo "                      and flagging blocking issues. Results are summarized with"
+    echo "                      an approve/reject recommendation. Output: .ralph/deep-review.md"
     echo ""
     echo "Supported tools: claude, codex, gemini, copilot"
     echo ""
@@ -233,7 +240,7 @@ usage() {
     echo "    .ralph/config       Project-specific overrides"
     echo "    CLI flags           --builder, --reviewer (highest priority)"
     echo ""
-    echo "Requires .ralph/tasks.md to exist with a task list (not needed for --collab/--fix-issue)."
+    echo "Requires .ralph/tasks.md to exist with a task list (not needed for --collab/--fix-issue/--deep-review)."
     echo "The prompt is stored in .ralph/prompt.txt and can be edited while ralph runs."
     echo "Changes take effect on the next iteration."
     exit 1
@@ -1132,6 +1139,307 @@ The approach was discussed and agreed upon by $builder_name and $reviewer_name. 
     echo -e "${YELLOW}Reached max iterations during fix implementation.${NC}"
 }
 
+# ============================================
+# Deep Review Mode
+# ============================================
+
+# Initialize deep review file
+init_deep_review() {
+    local description="$1"
+    mkdir -p "$RALPH_DIR"
+    cat > "$DEEP_REVIEW_FILE" << EOF
+# Deep Review: $description
+
+EOF
+}
+
+# Collab phase: agents discuss and produce a review checklist
+run_deep_review_collab() {
+    local description="$1"
+    local max_rounds=10
+
+    init_deep_review "$description"
+
+    # Use collab.md for the discussion phase
+    init_collab "Deep Review Planning: $description"
+
+    local builder_name
+    builder_name=$(get_tool_display_name "$BUILDER_TOOL")
+    local reviewer_name
+    reviewer_name=$(get_tool_display_name "$REVIEWER_TOOL")
+
+    log "Starting Deep Review Collab Phase"
+    log "Description: $description"
+
+    local collab_topic="Plan the review checklist for: $description
+
+Your goal is to agree on a list of review items that covers all the changes. Each item should be a focused, reviewable chunk that won't overload a single review session's context.
+
+Guidelines for splitting:
+- For small changes (a few files, limited diff): a single review item may suffice
+- For medium changes: group by logical area or feature
+- For large changes: review each file or closely related file group as a separate item
+- Each item should describe WHAT to review and WHERE (files/areas)
+
+Examine the actual diff/changes to determine the right granularity. Format each item as:
+- [ ] Review <description of what to review and where>
+
+The final agreed-upon list will be extracted and used as the review checklist."
+
+    local turn=0
+
+    while [[ $turn -lt $((max_rounds * 2)) ]]; do
+        turn=$((turn + 1))
+
+        if [[ $((turn % 2)) -eq 1 ]]; then
+            local turn_num=$(( (turn + 1) / 2 ))
+            run_collab_turn "$BUILDER_TOOL" "$collab_topic" "$turn_num" "$BUILDER_USER_ARGS" "Builder"
+        else
+            local turn_num=$((turn / 2))
+            run_collab_turn "$REVIEWER_TOOL" "$collab_topic" "$turn_num" "$REVIEWER_USER_ARGS" "Reviewer"
+        fi
+
+        if [[ $turn -ge 2 ]] && check_collab_agreement; then
+            log "Agents agreed on review checklist!"
+            break
+        fi
+    done
+
+    # Generate the finalized checklist
+    run_deep_review_checklist_summary "$description"
+}
+
+# After collab agreement, extract the review checklist into deep-review.md
+run_deep_review_checklist_summary() {
+    local description="$1"
+
+    local tool="$BUILDER_TOOL"
+    local tool_name
+    tool_name=$(get_tool_display_name "$tool")
+    local tool_color
+    tool_color=$(get_tool_color "$tool")
+
+    log_section "GENERATING REVIEW CHECKLIST ($tool_name)"
+
+    local conversation
+    conversation=$(cat "$COLLAB_FILE")
+
+    local summary_prompt="You just participated in a discussion to plan a code review. Here is the full conversation:
+
+$conversation
+
+Instructions:
+1. Extract the agreed-upon review checklist items
+2. Write them to $DEEP_REVIEW_FILE under a '## Review Items' heading
+3. Each item must be formatted as: - [ ] Review <description>
+4. Keep descriptions clear and specific about what files/areas to review
+5. The file already has a header — append the ## Review Items section after it
+6. Do NOT include any other content — just the heading and checklist items"
+
+    echo -e "${tool_color}--- Checklist Generation Start ---${NC}"
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    local debug_file="$RALPH_DIR/debug_${tool}_stream.json"
+    trap "rm -f $tmpfile" RETURN
+
+    run_tool_exec "$tool" "$summary_prompt" "$tmpfile" "$debug_file" "$BUILDER_USER_ARGS" || true
+
+    echo -e "${tool_color}--- Checklist Generation End ---${NC}"
+    rm -f "$debug_file"
+
+    # Display the checklist
+    echo ""
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}REVIEW CHECKLIST${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    awk '/^## Review Items/{found=1} found{print}' "$DEEP_REVIEW_FILE"
+    echo -e "${GREEN}========================================${NC}"
+    echo ""
+}
+
+# Run a single review pass: one tool reviews one checklist item
+run_deep_review_pass() {
+    local tool="$1"
+    local role_label="$2"
+    local item="$3"
+    local description="$4"
+    local user_args="${5:-}"
+
+    local tool_name
+    tool_name=$(get_tool_display_name "$tool")
+    local tool_color
+    tool_color=$(get_tool_color "$tool")
+
+    log_section "$role_label ($tool_name) - Reviewing: $item"
+
+    local review_prompt="You are $role_label in a deep code review.
+
+REVIEW CONTEXT: $description
+
+YOUR REVIEW ITEM: $item
+
+Instructions:
+1. Examine the relevant code, files, and diff for this review item
+2. Write your review notes — be specific about what you looked at
+3. Flag any blocking issues that must be fixed before approval
+4. It is perfectly acceptable to state that the changes look good — do not force-find issues
+5. Append your review to $DEEP_REVIEW_FILE as a new section with the header:
+   ## $role_label ($tool_name) — $item
+6. Under your section, write:
+   - **Notes:** your observations and analysis
+   - **Blocking Issues:** list any, or 'None' if the changes are acceptable
+7. Keep your review focused on THIS item only"
+
+    log "=== $role_label REVIEW PROMPT ==="
+    echo "$review_prompt" | tee -a "$LOG_FILE"
+    log "=== END $role_label REVIEW PROMPT ==="
+
+    echo -e "${tool_color}--- ${role_label} (${tool_name}) Output Start ---${NC}"
+    echo "--- ${role_label} (${tool_name}) Output Start ---" >> "$LOG_FILE"
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    local debug_file="$RALPH_DIR/debug_${tool}_stream.json"
+    trap "rm -f $tmpfile" RETURN
+
+    if run_tool_exec "$tool" "$review_prompt" "$tmpfile" "$debug_file" "$user_args"; then
+        echo ""
+        echo -e "${tool_color}--- ${role_label} (${tool_name}) Output End ---${NC}"
+        echo "--- ${role_label} (${tool_name}) Output End ---" >> "$LOG_FILE"
+        display_tool_usage "$tool" "$tmpfile"
+        log "$role_label review of '$item' complete (total: $(get_total_elapsed))"
+        rm -f "$debug_file"
+        return 0
+    else
+        echo ""
+        echo -e "${tool_color}--- ${role_label} (${tool_name}) Output End ---${NC}"
+        echo "--- ${role_label} (${tool_name}) Output End ---" >> "$LOG_FILE"
+        log "$role_label review of '$item' failed (total: $(get_total_elapsed))"
+        rm -f "$debug_file"
+        return 1
+    fi
+}
+
+# Generate final summary of the deep review
+run_deep_review_summary() {
+    local description="$1"
+
+    local tool="$BUILDER_TOOL"
+    local tool_name
+    tool_name=$(get_tool_display_name "$tool")
+    local tool_color
+    tool_color=$(get_tool_color "$tool")
+
+    log_section "GENERATING DEEP REVIEW SUMMARY ($tool_name)"
+
+    local summary_prompt="You have completed a deep code review. The full review is in $DEEP_REVIEW_FILE.
+
+Instructions:
+1. Read the entire $DEEP_REVIEW_FILE
+2. Append a '## Final Summary' section at the end of the file
+3. In the summary, include:
+   - A brief overview of what was reviewed
+   - A consolidated list of all blocking issues found across all review items (if any)
+   - A consolidated list of non-blocking suggestions (if any)
+   - A clear final verdict: 'APPROVED' if no blocking issues were found, or 'CHANGES REQUESTED' with a list of required changes
+4. Be concise and actionable"
+
+    echo -e "${tool_color}--- Summary Generation Start ---${NC}"
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    local debug_file="$RALPH_DIR/debug_${tool}_stream.json"
+    trap "rm -f $tmpfile" RETURN
+
+    run_tool_exec "$tool" "$summary_prompt" "$tmpfile" "$debug_file" "$BUILDER_USER_ARGS" || true
+
+    echo -e "${tool_color}--- Summary Generation End ---${NC}"
+    rm -f "$debug_file"
+
+    # Print the final summary to console
+    echo ""
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}DEEP REVIEW — FINAL SUMMARY${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    awk '/^## Final Summary/{found=1} found{print}' "$DEEP_REVIEW_FILE"
+    echo -e "${GREEN}========================================${NC}"
+    echo ""
+    echo -e "Full review saved to ${CYAN}$DEEP_REVIEW_FILE${NC}"
+}
+
+# Main deep review orchestrator
+run_deep_review() {
+    local description="$1"
+
+    init_ralph
+
+    RALPH_START_TIME=$(date +%s)
+
+    local builder_name
+    builder_name=$(get_tool_display_name "$BUILDER_TOOL")
+    local reviewer_name
+    reviewer_name=$(get_tool_display_name "$REVIEWER_TOOL")
+
+    log "Starting Deep Review Mode"
+    log "Description: $description"
+    log "Reviewer 1: $builder_name"
+    log "Reviewer 2: $reviewer_name"
+
+    # Phase 1: Collab to produce review checklist
+    log_section "PHASE 1: BUILDING REVIEW CHECKLIST"
+    echo -e "${CYAN}Phase 1: Building review checklist...${NC}"
+    run_deep_review_collab "$description"
+
+    # Phase 2: Review each item with both reviewers
+    log_section "PHASE 2: REVIEWING ITEMS"
+    echo -e "${CYAN}Phase 2: Reviewing each item...${NC}"
+
+    # Extract checklist items from the deep review file
+    local items=()
+    while IFS= read -r line; do
+        # Strip the "- [ ] " prefix to get the item description
+        local item="${line#- \[ \] }"
+        items+=("$item")
+    done < <(grep '^- \[ \] ' "$DEEP_REVIEW_FILE")
+
+    local total=${#items[@]}
+    if [[ $total -eq 0 ]]; then
+        echo -e "${RED}No review items found in checklist. Cannot proceed with review.${NC}"
+        log "Deep review aborted: no checklist items found"
+        return 1
+    else
+        local idx=0
+        for item in "${items[@]}"; do
+            idx=$((idx + 1))
+            echo ""
+            echo -e "${BLUE}--- Review Item $idx of $total ---${NC}"
+            echo -e "${BLUE}$item${NC}"
+            echo ""
+
+            # Reviewer 1: builder tool
+            run_deep_review_pass "$BUILDER_TOOL" "Reviewer 1" "$item" "$description" "$BUILDER_USER_ARGS" || true
+
+            # Reviewer 2: reviewer tool
+            run_deep_review_pass "$REVIEWER_TOOL" "Reviewer 2" "$item" "$description" "$REVIEWER_USER_ARGS" || true
+
+            # Mark item as reviewed in the file
+            local escaped_item
+            escaped_item=$(printf '%s\n' "$item" | sed 's/[[\.*^$()+?{|\/&]/\\&/g')
+            sed -i '' "s|- \[ \] ${escaped_item}|- [x] ${escaped_item}|" "$DEEP_REVIEW_FILE"
+
+            log "Item $idx of $total reviewed (total: $(get_total_elapsed))"
+        done
+    fi
+
+    # Phase 3: Final summary
+    log_section "PHASE 3: FINAL SUMMARY"
+    echo -e "${CYAN}Phase 3: Generating final summary...${NC}"
+    run_deep_review_summary "$description"
+
+    log "Deep review complete (total: $(get_total_elapsed))"
+}
+
 # Main execution
 main() {
     local prompt=""
@@ -1217,6 +1525,21 @@ main() {
                 exit 1
             fi
             run_fix_issue "$issue_topic"
+            exit 0
+            ;;
+        --deep-review)
+            shift
+            local review_description="${1:-}"
+            if [[ -z "$review_description" ]]; then
+                review_description=$(get_current_prompt)
+            fi
+            if [[ -z "$review_description" ]]; then
+                echo -e "${RED}Error: No review description provided.${NC}"
+                echo "Usage: ralph --deep-review \"review feature-branch relative to main\""
+                echo "Or create $PROMPT_FILE with the description."
+                exit 1
+            fi
+            run_deep_review "$review_description"
             exit 0
             ;;
         *)

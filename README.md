@@ -164,6 +164,20 @@ Combines collab and the standard builder/reviewer loop:
 
 This is useful when you want the two models to discuss a problem before implementing a solution, without running `--collab` and standard mode separately.
 
+### Deep review mode
+
+```bash
+ralph --deep-review "review feature-branch relative to main"
+```
+
+A three-phase code review process:
+
+1. **Phase 1 (Collab):** Builder and reviewer tools discuss the changes and agree on a review checklist, sized so no single review overloads context (one item for small changes, per-file for large ones)
+2. **Phase 2 (Review):** Each checklist item is reviewed independently by both tools — the builder tool as Reviewer 1 and the reviewer tool as Reviewer 2. Each writes notes and flags any blocking issues
+3. **Phase 3 (Summary):** Findings are consolidated into a final summary with an approve/reject recommendation
+
+Output is saved to `.ralph/deep-review.md` with the final summary also printed to the console.
+
 ### Dynamic Prompt Updates
 
 The prompt is stored in `.ralph/prompt.txt` and is **re-read on every iteration**. This means you can edit the prompt file while Ralph is running, and your changes will take effect on the next iteration.
@@ -199,7 +213,8 @@ The prompt is stored in `.ralph/prompt.txt` and is **re-read on every iteration*
 - `config` - Project-specific tool configuration (overrides global)
 - `prompt.txt` - The current prompt (editable while running)
 - `tasks.md` - The task list with status markers
-- `collab.md` - Collab discussion transcript and summary (created by `--collab` and `--fix-issue`)
+- `collab.md` - Collab discussion transcript and summary (created by `--collab` and `--fix-issue`; also used for the planning discussion in `--deep-review`)
+- `deep-review.md` - Deep review checklist, reviewer notes, and final summary (created by `--deep-review`)
 - `ralph.log` - Full execution log
 - `state` - Internal state tracking
 
