@@ -173,7 +173,7 @@ ralph --deep-review "review feature-branch relative to main"
 A three-phase code review process:
 
 1. **Phase 1 (Collab):** Builder and reviewer tools discuss the changes and agree on a review checklist, sized so no single review overloads context (one item for small changes, per-file for large ones)
-2. **Phase 2 (Review):** Each checklist item is reviewed independently by both tools — the builder tool as Reviewer 1 and the reviewer tool as Reviewer 2. Each writes notes and flags any blocking issues
+2. **Phase 2 (Review):** For each checklist item, builder and reviewer tools collab — discussing the code back-and-forth until they agree on findings, blocking issues, and whether the changes are acceptable
 3. **Phase 3 (Summary):** Findings are consolidated into a final summary with an approve/reject recommendation
 
 Output is saved to `.ralph/deep-review.md` with the final summary also printed to the console.

@@ -1258,67 +1258,131 @@ Instructions:
     echo ""
 }
 
-# Run a single review pass: one tool reviews one checklist item
-run_deep_review_pass() {
-    local tool="$1"
-    local role_label="$2"
-    local item="$3"
-    local description="$4"
-    local user_args="${5:-}"
+# Run a collaborative review of a single checklist item
+# Both tools discuss the item until they agree on findings
+run_deep_review_item_collab() {
+    local item="$1"
+    local description="$2"
+    local item_num="$3"
+    local item_total="$4"
+    local max_rounds=10
 
+    local item_collab_file="$RALPH_DIR/deep-review-item.md"
+
+    local builder_name
+    builder_name=$(get_tool_display_name "$BUILDER_TOOL")
+    local reviewer_name
+    reviewer_name=$(get_tool_display_name "$REVIEWER_TOOL")
+
+    # Initialize per-item collab file
+    cat > "$item_collab_file" << EOF
+# Review Item $item_num of $item_total: $item
+EOF
+
+    log "Starting collab review for item $item_num: $item"
+
+    local review_topic="Review this specific item from a deep code review.
+
+REVIEW CONTEXT: $description
+
+REVIEW ITEM: $item
+
+Your goal is to collaboratively review this item. Examine the relevant code, files, and diff. Discuss:
+- What you observe about the changes
+- Any issues (blocking or non-blocking)
+- Whether the changes are acceptable
+
+It is perfectly fine to agree that the changes look good — do not force-find issues.
+
+When you reach agreement, your findings will be summarized and recorded."
+
+    local turn=0
+
+    while [[ $turn -lt $((max_rounds * 2)) ]]; do
+        turn=$((turn + 1))
+
+        if [[ $((turn % 2)) -eq 1 ]]; then
+            local turn_num=$(( (turn + 1) / 2 ))
+            # Use item collab file instead of main collab file
+            local saved_collab="$COLLAB_FILE"
+            COLLAB_FILE="$item_collab_file"
+            run_collab_turn "$BUILDER_TOOL" "$review_topic" "$turn_num" "$BUILDER_USER_ARGS" "Builder"
+            COLLAB_FILE="$saved_collab"
+        else
+            local turn_num=$((turn / 2))
+            local saved_collab="$COLLAB_FILE"
+            COLLAB_FILE="$item_collab_file"
+            run_collab_turn "$REVIEWER_TOOL" "$review_topic" "$turn_num" "$REVIEWER_USER_ARGS" "Reviewer"
+            COLLAB_FILE="$saved_collab"
+        fi
+
+        # Check for agreement (need to point at item collab file)
+        if [[ $turn -ge 2 ]]; then
+            local last_two_verdicts
+            last_two_verdicts=$(awk '
+                /^## (Builder|Reviewer) / {
+                    if (verdict != "") { print verdict; verdict="" }
+                }
+                /^AGREE$/ { verdict="AGREE" }
+                /^DISAGREE$/ { verdict="DISAGREE" }
+                END { if (verdict != "") print verdict }
+            ' "$item_collab_file" | tail -2)
+
+            local count
+            count=$(echo "$last_two_verdicts" | wc -l | tr -d ' ')
+            local agrees
+            agrees=$(echo "$last_two_verdicts" | grep -c "^AGREE$" || true)
+
+            if [[ "$count" -ge 2 && "$agrees" -eq 2 ]]; then
+                log "Reviewers agreed on item $item_num!"
+                break
+            fi
+        fi
+    done
+
+    # Generate summary of this item's review and append to deep-review.md
+    run_deep_review_item_summary "$item" "$item_collab_file"
+}
+
+# Summarize a single item's collab review into deep-review.md
+run_deep_review_item_summary() {
+    local item="$1"
+    local item_collab_file="$2"
+
+    local tool="$BUILDER_TOOL"
     local tool_name
     tool_name=$(get_tool_display_name "$tool")
     local tool_color
     tool_color=$(get_tool_color "$tool")
 
-    log_section "$role_label ($tool_name) - Reviewing: $item"
+    log_section "SUMMARIZING ITEM REVIEW ($tool_name): $item"
 
-    local review_prompt="You are $role_label in a deep code review.
+    local conversation
+    conversation=$(cat "$item_collab_file")
 
-REVIEW CONTEXT: $description
+    local summary_prompt="You just completed a collaborative code review of one item. Here is the full discussion:
 
-YOUR REVIEW ITEM: $item
+$conversation
 
 Instructions:
-1. Examine the relevant code, files, and diff for this review item
-2. Write your review notes — be specific about what you looked at
-3. Flag any blocking issues that must be fixed before approval
-4. It is perfectly acceptable to state that the changes look good — do not force-find issues
-5. Append your review to $DEEP_REVIEW_FILE as a new section with the header:
-   ## $role_label ($tool_name) — $item
-6. Under your section, write:
-   - **Notes:** your observations and analysis
-   - **Blocking Issues:** list any, or 'None' if the changes are acceptable
-7. Keep your review focused on THIS item only"
+1. Append a summary of the agreed-upon findings to $DEEP_REVIEW_FILE
+2. Use the header: ## Review: $item
+3. Under the header, write:
+   - **Notes:** key observations both reviewers agreed on
+   - **Blocking Issues:** list any that both agreed on, or 'None'
+4. Be concise — capture the consensus, not the full discussion"
 
-    log "=== $role_label REVIEW PROMPT ==="
-    echo "$review_prompt" | tee -a "$LOG_FILE"
-    log "=== END $role_label REVIEW PROMPT ==="
-
-    echo -e "${tool_color}--- ${role_label} (${tool_name}) Output Start ---${NC}"
-    echo "--- ${role_label} (${tool_name}) Output Start ---" >> "$LOG_FILE"
+    echo -e "${tool_color}--- Item Summary Start ---${NC}"
 
     local tmpfile
     tmpfile=$(mktemp)
     local debug_file="$RALPH_DIR/debug_${tool}_stream.json"
     trap "rm -f $tmpfile" RETURN
 
-    if run_tool_exec "$tool" "$review_prompt" "$tmpfile" "$debug_file" "$user_args"; then
-        echo ""
-        echo -e "${tool_color}--- ${role_label} (${tool_name}) Output End ---${NC}"
-        echo "--- ${role_label} (${tool_name}) Output End ---" >> "$LOG_FILE"
-        display_tool_usage "$tool" "$tmpfile"
-        log "$role_label review of '$item' complete (total: $(get_total_elapsed))"
-        rm -f "$debug_file"
-        return 0
-    else
-        echo ""
-        echo -e "${tool_color}--- ${role_label} (${tool_name}) Output End ---${NC}"
-        echo "--- ${role_label} (${tool_name}) Output End ---" >> "$LOG_FILE"
-        log "$role_label review of '$item' failed (total: $(get_total_elapsed))"
-        rm -f "$debug_file"
-        return 1
-    fi
+    run_tool_exec "$tool" "$summary_prompt" "$tmpfile" "$debug_file" "$BUILDER_USER_ARGS" || true
+
+    echo -e "${tool_color}--- Item Summary End ---${NC}"
+    rm -f "$debug_file"
 }
 
 # Generate final summary of the deep review
@@ -1417,11 +1481,8 @@ run_deep_review() {
             echo -e "${BLUE}$item${NC}"
             echo ""
 
-            # Reviewer 1: builder tool
-            run_deep_review_pass "$BUILDER_TOOL" "Reviewer 1" "$item" "$description" "$BUILDER_USER_ARGS" || true
-
-            # Reviewer 2: reviewer tool
-            run_deep_review_pass "$REVIEWER_TOOL" "Reviewer 2" "$item" "$description" "$REVIEWER_USER_ARGS" || true
+            # Both reviewers collab on this item until they agree
+            run_deep_review_item_collab "$item" "$description" "$idx" "$total"
 
             # Mark item as reviewed in the file
             local escaped_item
