@@ -696,7 +696,7 @@ $diff_summary"
                 # Failures fall through to the fallback below.
                 case "$tool" in
                     claude)
-                        commit_msg=$(claude --print --model claude-haiku-4-5-20251001 -p "$commit_prompt" 2>/dev/null | head -1) || true
+                        commit_msg=$(claude --print -p "$commit_prompt" 2>/dev/null | head -1) || true
                         ;;
                     codex)
                         commit_msg=$(echo "$commit_prompt" | codex exec - 2>/dev/null | tail -1) || true
