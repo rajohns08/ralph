@@ -905,6 +905,8 @@ Instructions:
 4. Append your response to $COLLAB_FILE as a new section with the header: ## $label (Turn $turn_num)
 5. At the very end of your appended section, on its own line, write exactly AGREE if you agree with the current consensus/direction, or DISAGREE if you think more discussion is needed
 
+IMPORTANT: Do NOT make any changes to files during this discussion. Do not edit, create, or delete any files. Your only task is to discuss and reach agreement. All file modifications will happen in a later phase.
+
 Your response should be substantive but concise. Focus on reaching agreement."
 
     log "=== ${tool_name} COLLAB PROMPT ==="
