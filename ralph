@@ -990,7 +990,9 @@ Instructions:
 1. Write a concise summary of what was agreed upon
 2. Append it to $COLLAB_FILE as a new section with the header: ## Summary
 3. The summary should capture the key points of agreement and any important nuances
-4. Keep it focused and actionable"
+4. Keep it focused and actionable
+
+IMPORTANT: Do NOT make any changes to files other than appending the summary to $COLLAB_FILE. Do not edit, create, or delete any other files."
 
     echo -e "${tool_color}--- Summary Generation Start ---${NC}"
 
@@ -1372,7 +1374,9 @@ Instructions:
 3. Under the header, write:
    - **Notes:** key observations both reviewers agreed on
    - **Blocking Issues:** list any that both agreed on, or 'None'
-4. Be concise — capture the consensus, not the full discussion"
+4. Be concise — capture the consensus, not the full discussion
+
+IMPORTANT: Do NOT make any changes to files other than appending the summary to $DEEP_REVIEW_FILE. Do not edit, create, or delete any other files."
 
     echo -e "${tool_color}--- Item Summary Start ---${NC}"
 
@@ -1409,7 +1413,9 @@ Instructions:
    - A consolidated list of all blocking issues found across all review items (if any)
    - A consolidated list of non-blocking suggestions (if any)
    - A clear final verdict: 'APPROVED' if no blocking issues were found, or 'CHANGES REQUESTED' with a list of required changes
-4. Be concise and actionable"
+4. Be concise and actionable
+
+IMPORTANT: Do NOT make any changes to files other than appending the summary to $DEEP_REVIEW_FILE. Do not edit, create, or delete any other files."
 
     echo -e "${tool_color}--- Summary Generation Start ---${NC}"
 
