@@ -225,6 +225,10 @@ usage() {
     echo "                      both tools independently review each item, writing notes"
     echo "                      and flagging blocking issues. Results are summarized with"
     echo "                      an approve/reject recommendation. Output: .ralph/deep-review.md"
+    echo "  --deep-review --continue"
+    echo "                      Resume an interrupted deep review from where it left off."
+    echo "                      Skips Phase 1 (checklist building) and picks up at the"
+    echo "                      first unchecked item."
     echo ""
     echo "Supported tools: claude, codex, gemini, copilot"
     echo ""
@@ -1440,9 +1444,18 @@ IMPORTANT: Do NOT make any changes to files other than appending the summary to 
     echo -e "Full review saved to ${CYAN}$DEEP_REVIEW_FILE${NC}"
 }
 
+# Extract description from an existing deep review file
+get_deep_review_description() {
+    local header
+    header=$(head -1 "$DEEP_REVIEW_FILE")
+    # Strip "# Deep Review: " prefix
+    echo "${header#\# Deep Review: }"
+}
+
 # Main deep review orchestrator
 run_deep_review() {
     local description="$1"
+    local continue_review="${2:-false}"
 
     init_ralph
 
@@ -1453,58 +1466,98 @@ run_deep_review() {
     local reviewer_name
     reviewer_name=$(get_tool_display_name "$REVIEWER_TOOL")
 
-    log "Starting Deep Review Mode"
-    log "Description: $description"
-    log "Reviewer 1: $builder_name"
-    log "Reviewer 2: $reviewer_name"
+    if [[ "$continue_review" == true ]]; then
+        # Extract description from existing file
+        description=$(get_deep_review_description)
 
-    # Phase 1: Collab to produce review checklist
-    log_section "PHASE 1: BUILDING REVIEW CHECKLIST"
-    echo -e "${CYAN}Phase 1: Building review checklist...${NC}"
-    run_deep_review_collab "$description"
+        local checked_count unchecked_count
+        checked_count=$(grep -c '^- \[x\] ' "$DEEP_REVIEW_FILE" || true)
+        unchecked_count=$(grep -c '^- \[ \] ' "$DEEP_REVIEW_FILE" || true)
+        log "Resuming Deep Review Mode ($checked_count done, $unchecked_count remaining)"
+        log "Description: $description"
+        log "Reviewer 1: $builder_name"
+        log "Reviewer 2: $reviewer_name"
+        echo -e "${CYAN}Resuming deep review ($checked_count done, $unchecked_count remaining)...${NC}"
+    else
+        log "Starting Deep Review Mode"
+        log "Description: $description"
+        log "Reviewer 1: $builder_name"
+        log "Reviewer 2: $reviewer_name"
+
+        # Phase 1: Collab to produce review checklist
+        log_section "PHASE 1: BUILDING REVIEW CHECKLIST"
+        echo -e "${CYAN}Phase 1: Building review checklist...${NC}"
+        run_deep_review_collab "$description"
+    fi
 
     # Phase 2: Review each item with both reviewers
     log_section "PHASE 2: REVIEWING ITEMS"
     echo -e "${CYAN}Phase 2: Reviewing each item...${NC}"
 
-    # Extract checklist items from the deep review file
+    # Count total items (checked + unchecked) for display
+    local total_items
+    total_items=$(grep -c '^- \[.\] ' "$DEEP_REVIEW_FILE" || true)
+
+    # Extract only unchecked items
     local items=()
     while IFS= read -r line; do
-        # Strip the "- [ ] " prefix to get the item description
         local item="${line#- \[ \] }"
         items+=("$item")
     done < <(grep '^- \[ \] ' "$DEEP_REVIEW_FILE")
 
-    local total=${#items[@]}
-    if [[ $total -eq 0 ]]; then
-        echo -e "${RED}No review items found in checklist. Cannot proceed with review.${NC}"
-        log "Deep review aborted: no checklist items found"
-        return 1
+    local remaining=${#items[@]}
+    if [[ $remaining -eq 0 ]]; then
+        if [[ $total_items -gt 0 ]]; then
+            echo -e "${GREEN}All review items already completed.${NC}"
+            log "All items already reviewed, skipping to summary"
+        else
+            echo -e "${RED}No review items found in checklist. Cannot proceed with review.${NC}"
+            log "Deep review aborted: no checklist items found"
+            return 1
+        fi
     else
-        local idx=0
+        # Strip stale final summary before reviewing items, so new item
+        # summaries don't get appended after it and then lost
+        local summary_line
+        summary_line=$(grep -n '^## Final Summary' "$DEEP_REVIEW_FILE" | head -1 | cut -d: -f1 || true)
+        if [[ -n "$summary_line" ]]; then
+            sed -i '' "${summary_line},\$d" "$DEEP_REVIEW_FILE"
+            log "Removed stale final summary before reviewing new items"
+        fi
+
+        # Calculate starting index based on how many are already done
+        local done_count=$((total_items - remaining))
+        local idx=$done_count
         for item in "${items[@]}"; do
             idx=$((idx + 1))
             echo ""
-            echo -e "${BLUE}--- Review Item $idx of $total ---${NC}"
+            echo -e "${BLUE}--- Review Item $idx of $total_items ---${NC}"
             echo -e "${BLUE}$item${NC}"
             echo ""
 
             # Both reviewers collab on this item until they agree
-            run_deep_review_item_collab "$item" "$description" "$idx" "$total"
+            run_deep_review_item_collab "$item" "$description" "$idx" "$total_items"
 
             # Mark item as reviewed in the file
-            local escaped_item
-            escaped_item=$(printf '%s\n' "$item" | sed 's/[[\.*^$()+?{|\/&]/\\&/g')
-            sed -i '' "s|- \[ \] ${escaped_item}|- [x] ${escaped_item}|" "$DEEP_REVIEW_FILE"
+            local line_num
+            line_num=$(grep -nF -- "- [ ] ${item}" "$DEEP_REVIEW_FILE" | head -1 | cut -d: -f1 || true)
+            if [[ -n "$line_num" ]]; then
+                sed -i '' "${line_num}s/- \[ \] /- [x] /" "$DEEP_REVIEW_FILE"
+            fi
 
-            log "Item $idx of $total reviewed (total: $(get_total_elapsed))"
+            log "Item $idx of $total_items reviewed (total: $(get_total_elapsed))"
         done
     fi
 
-    # Phase 3: Final summary
-    log_section "PHASE 3: FINAL SUMMARY"
-    echo -e "${CYAN}Phase 3: Generating final summary...${NC}"
-    run_deep_review_summary "$description"
+    # Phase 3: Final summary (skip only if no new work and summary exists)
+    if grep -q '^## Final Summary' "$DEEP_REVIEW_FILE"; then
+        echo -e "${GREEN}Final summary already exists, skipping.${NC}"
+        log "Final summary already present, skipping Phase 3"
+    else
+        log_section "PHASE 3: FINAL SUMMARY"
+        echo -e "${CYAN}Phase 3: Generating final summary...${NC}"
+        run_deep_review_summary "$description"
+    fi
 
     log "Deep review complete (total: $(get_total_elapsed))"
 }
@@ -1598,6 +1651,22 @@ main() {
             ;;
         --deep-review)
             shift
+            if [[ "${1:-}" == "--continue" ]]; then
+                shift
+                if [[ ! -f "$DEEP_REVIEW_FILE" ]]; then
+                    echo -e "${RED}Error: No existing deep review found at $DEEP_REVIEW_FILE${NC}"
+                    echo "Run a deep review first: ralph --deep-review \"description\""
+                    exit 1
+                fi
+                local existing_items
+                existing_items=$(grep -c '^- \[.\] ' "$DEEP_REVIEW_FILE" || true)
+                if [[ $existing_items -eq 0 ]]; then
+                    echo -e "${RED}Error: Existing deep review file has no checklist items.${NC}"
+                    exit 1
+                fi
+                run_deep_review "" true
+                exit 0
+            fi
             local review_description="${1:-}"
             if [[ -z "$review_description" ]]; then
                 review_description=$(get_current_prompt)
@@ -1605,6 +1674,7 @@ main() {
             if [[ -z "$review_description" ]]; then
                 echo -e "${RED}Error: No review description provided.${NC}"
                 echo "Usage: ralph --deep-review \"review feature-branch relative to main\""
+                echo "       ralph --deep-review --continue  (resume interrupted review)"
                 echo "Or create $PROMPT_FILE with the description."
                 exit 1
             fi
