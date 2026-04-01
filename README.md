@@ -178,6 +178,14 @@ A three-phase code review process:
 
 Output is saved to `.ralph/deep-review.md` with the final summary also printed to the console.
 
+If a deep review is interrupted (e.g. API failure, timeout, manual stop), resume it with:
+
+```bash
+ralph --deep-review --continue
+```
+
+This picks up at the first unchecked item, skipping Phase 1 and any already-reviewed items. No need to re-provide the description — it's read from the existing file.
+
 ### Dynamic Prompt Updates
 
 The prompt is stored in `.ralph/prompt.txt` and is **re-read on every iteration**. This means you can edit the prompt file while Ralph is running, and your changes will take effect on the next iteration.
