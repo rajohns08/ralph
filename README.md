@@ -186,6 +186,28 @@ ralph --deep-review --continue
 
 This picks up at the first unchecked item, skipping Phase 1 and any already-reviewed items. No need to re-provide the description — it's read from the existing file.
 
+### Deep plan mode
+
+```bash
+ralph --deep-plan "question or goal to investigate"
+```
+
+A three-phase deep analysis process for answering questions or building plans that require examining large or multiple codebases:
+
+1. **Phase 1 (Collab):** Builder and reviewer tools discuss the goal and agree on an investigation checklist — a set of focused areas to examine, ordered so foundational understanding comes first
+2. **Phase 2 (Investigate):** For each checklist item, builder and reviewer tools collab — examining the relevant code, files, and structure until they agree on findings and insights
+3. **Phase 3 (Synthesis):** All findings are synthesized into a comprehensive answer or plan addressing the original goal, with key insights and recommendations
+
+Output is saved to `.ralph/deep-plan.md` with the final synthesis also printed to the console.
+
+If a deep plan is interrupted, resume it with:
+
+```bash
+ralph --deep-plan --continue
+```
+
+This picks up at the first unchecked item, skipping Phase 1 and any already-investigated items.
+
 ### Dynamic Prompt Updates
 
 The prompt is stored in `.ralph/prompt.txt` and is **re-read on every iteration**. This means you can edit the prompt file while Ralph is running, and your changes will take effect on the next iteration.
@@ -221,8 +243,9 @@ The prompt is stored in `.ralph/prompt.txt` and is **re-read on every iteration*
 - `config` - Project-specific tool configuration (overrides global)
 - `prompt.txt` - The current prompt (editable while running)
 - `tasks.md` - The task list with status markers
-- `collab.md` - Collab discussion transcript and summary (created by `--collab` and `--fix-issue`; also used for the planning discussion in `--deep-review`)
+- `collab.md` - Collab discussion transcript and summary (created by `--collab` and `--fix-issue`; also used for the planning discussion in `--deep-review` and `--deep-plan`)
 - `deep-review.md` - Deep review checklist, reviewer notes, and final summary (created by `--deep-review`)
+- `deep-plan.md` - Investigation checklist, per-item findings, and final synthesis (created by `--deep-plan`)
 - `ralph.log` - Full execution log
 - `state` - Internal state tracking
 

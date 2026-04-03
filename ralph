@@ -14,6 +14,7 @@ STATE_FILE="$RALPH_DIR/state"
 PROMPT_FILE="$RALPH_DIR/prompt.txt"
 COLLAB_FILE="$RALPH_DIR/collab.md"
 DEEP_REVIEW_FILE="$RALPH_DIR/deep-review.md"
+DEEP_PLAN_FILE="$RALPH_DIR/deep-plan.md"
 CONFIG_FILE="$RALPH_DIR/config"
 GLOBAL_CONFIG_FILE="$HOME/.ralph/config"
 
@@ -202,6 +203,7 @@ usage() {
     echo "       ralph --collab \"topic to discuss\""
     echo "       ralph --fix-issue \"description of the issue\""
     echo "       ralph --deep-review \"review feature-branch relative to main\""
+    echo "       ralph --deep-plan \"question or goal to investigate\""
     echo ""
     echo "Arguments:"
     echo "  prompt          The instructions/goal for the task (saved to .ralph/prompt.txt)"
@@ -229,6 +231,13 @@ usage() {
     echo "                      Resume an interrupted deep review from where it left off."
     echo "                      Skips Phase 1 (checklist building) and picks up at the"
     echo "                      first unchecked item."
+    echo "  --deep-plan         Two-phase deep analysis. First, builder and reviewer collab"
+    echo "                      to plan how to investigate a question or goal across one or"
+    echo "                      more codebases. Then both tools investigate each area, noting"
+    echo "                      findings. Results are synthesized into a comprehensive answer"
+    echo "                      or plan. Output: .ralph/deep-plan.md"
+    echo "  --deep-plan --continue"
+    echo "                      Resume an interrupted deep plan from where it left off."
     echo ""
     echo "Supported tools: claude, codex, gemini, copilot"
     echo ""
@@ -244,7 +253,7 @@ usage() {
     echo "    .ralph/config       Project-specific overrides"
     echo "    CLI flags           --builder, --reviewer (highest priority)"
     echo ""
-    echo "Requires .ralph/tasks.md to exist with a task list (not needed for --collab/--fix-issue/--deep-review)."
+    echo "Requires .ralph/tasks.md to exist with a task list (not needed for --collab/--fix-issue/--deep-review/--deep-plan)."
     echo "The prompt is stored in .ralph/prompt.txt and can be edited while ralph runs."
     echo "Changes take effect on the next iteration."
     exit 1
@@ -1562,6 +1571,422 @@ run_deep_review() {
     log "Deep review complete (total: $(get_total_elapsed))"
 }
 
+# ============================================
+# Deep Plan Mode
+# ============================================
+
+# Initialize deep plan file
+init_deep_plan() {
+    local description="$1"
+    mkdir -p "$RALPH_DIR"
+    cat > "$DEEP_PLAN_FILE" << EOF
+# Deep Plan: $description
+
+EOF
+}
+
+# Collab phase: agents discuss and produce an investigation checklist
+run_deep_plan_collab() {
+    local description="$1"
+    local max_rounds=10
+
+    init_deep_plan "$description"
+
+    # Use collab.md for the discussion phase
+    init_collab "Deep Plan: $description"
+
+    local builder_name
+    builder_name=$(get_tool_display_name "$BUILDER_TOOL")
+    local reviewer_name
+    reviewer_name=$(get_tool_display_name "$REVIEWER_TOOL")
+
+    log "Starting Deep Plan Collab Phase"
+    log "Description: $description"
+
+    local collab_topic="Plan the investigation for: $description
+
+Your goal is to agree on a list of investigation items that will thoroughly address the question or goal above. Each item should be a focused, manageable chunk of research that won't overload a single session's context.
+
+Guidelines for splitting:
+- Break the work into logical areas, features, or topics to investigate
+- Each item should describe WHAT to investigate and WHERE (which files, directories, or areas of the codebase)
+- Order items so that foundational understanding comes first
+- Ensure comprehensive coverage — the full set of items should be sufficient to answer the question or achieve the goal
+
+Examine the actual codebase(s) to determine the right granularity. Format each item as:
+- [ ] Investigate <description of what to examine and where>
+
+The final agreed-upon list will be extracted and used as the investigation checklist."
+
+    local turn=0
+
+    while [[ $turn -lt $((max_rounds * 2)) ]]; do
+        turn=$((turn + 1))
+
+        if [[ $((turn % 2)) -eq 1 ]]; then
+            local turn_num=$(( (turn + 1) / 2 ))
+            run_collab_turn "$BUILDER_TOOL" "$collab_topic" "$turn_num" "$BUILDER_USER_ARGS" "Builder"
+        else
+            local turn_num=$((turn / 2))
+            run_collab_turn "$REVIEWER_TOOL" "$collab_topic" "$turn_num" "$REVIEWER_USER_ARGS" "Reviewer"
+        fi
+
+        if [[ $turn -ge 2 ]] && check_collab_agreement; then
+            log "Agents agreed on investigation checklist!"
+            break
+        fi
+    done
+
+    # Generate the finalized checklist
+    run_deep_plan_checklist_summary "$description"
+}
+
+# After collab agreement, extract the investigation checklist into deep-plan.md
+run_deep_plan_checklist_summary() {
+    local description="$1"
+
+    local tool="$BUILDER_TOOL"
+    local tool_name
+    tool_name=$(get_tool_display_name "$tool")
+    local tool_color
+    tool_color=$(get_tool_color "$tool")
+
+    log_section "GENERATING INVESTIGATION CHECKLIST ($tool_name)"
+
+    local conversation
+    conversation=$(cat "$COLLAB_FILE")
+
+    local summary_prompt="You just participated in a discussion to plan an investigation. Here is the full conversation:
+
+$conversation
+
+Instructions:
+1. Extract the agreed-upon investigation checklist items
+2. Write them to $DEEP_PLAN_FILE under a '## Investigation Items' heading
+3. Each item must be formatted as: - [ ] Investigate <description>
+4. Keep descriptions clear and specific about what files/areas to investigate
+5. The file already has a header — append the ## Investigation Items section after it
+6. Do NOT include any other content — just the heading and checklist items"
+
+    echo -e "${tool_color}--- Checklist Generation Start ---${NC}"
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    local debug_file="$RALPH_DIR/debug_${tool}_stream.json"
+    trap "rm -f $tmpfile" RETURN
+
+    run_tool_exec "$tool" "$summary_prompt" "$tmpfile" "$debug_file" "$BUILDER_USER_ARGS" || true
+
+    echo -e "${tool_color}--- Checklist Generation End ---${NC}"
+    rm -f "$debug_file"
+
+    # Display the checklist
+    echo ""
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}INVESTIGATION CHECKLIST${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    awk '/^## Investigation Items/{found=1} found{print}' "$DEEP_PLAN_FILE"
+    echo -e "${GREEN}========================================${NC}"
+    echo ""
+}
+
+# Run a collaborative investigation of a single checklist item
+# Both tools discuss the item until they agree on findings
+run_deep_plan_item_collab() {
+    local item="$1"
+    local description="$2"
+    local item_num="$3"
+    local item_total="$4"
+    local max_rounds=10
+
+    local item_collab_file="$RALPH_DIR/deep-plan-item.md"
+
+    local builder_name
+    builder_name=$(get_tool_display_name "$BUILDER_TOOL")
+    local reviewer_name
+    reviewer_name=$(get_tool_display_name "$REVIEWER_TOOL")
+
+    # Initialize per-item collab file
+    cat > "$item_collab_file" << EOF
+# Investigation Item $item_num of $item_total: $item
+EOF
+
+    log "Starting collab investigation for item $item_num: $item"
+
+    local plan_topic="Investigate this specific item from a deep planning analysis.
+
+OVERALL GOAL: $description
+
+INVESTIGATION ITEM: $item
+
+Your goal is to collaboratively investigate this item. Examine the relevant code, files, and structure. Discuss:
+- What you observe in the codebase for this area
+- Key findings, patterns, or insights relevant to the overall goal
+- Any gaps, risks, or important details to note
+
+Be thorough but focused on what's relevant to the overall goal.
+
+When you reach agreement, your findings will be summarized and recorded."
+
+    local turn=0
+
+    while [[ $turn -lt $((max_rounds * 2)) ]]; do
+        turn=$((turn + 1))
+
+        if [[ $((turn % 2)) -eq 1 ]]; then
+            local turn_num=$(( (turn + 1) / 2 ))
+            # Use item collab file instead of main collab file
+            local saved_collab="$COLLAB_FILE"
+            COLLAB_FILE="$item_collab_file"
+            run_collab_turn "$BUILDER_TOOL" "$plan_topic" "$turn_num" "$BUILDER_USER_ARGS" "Builder"
+            COLLAB_FILE="$saved_collab"
+        else
+            local turn_num=$((turn / 2))
+            local saved_collab="$COLLAB_FILE"
+            COLLAB_FILE="$item_collab_file"
+            run_collab_turn "$REVIEWER_TOOL" "$plan_topic" "$turn_num" "$REVIEWER_USER_ARGS" "Reviewer"
+            COLLAB_FILE="$saved_collab"
+        fi
+
+        # Check for agreement (need to point at item collab file)
+        if [[ $turn -ge 2 ]]; then
+            local last_two_verdicts
+            last_two_verdicts=$(awk '
+                /^## (Builder|Reviewer) / {
+                    if (verdict != "") { print verdict; verdict="" }
+                }
+                /^AGREE$/ { verdict="AGREE" }
+                /^DISAGREE$/ { verdict="DISAGREE" }
+                END { if (verdict != "") print verdict }
+            ' "$item_collab_file" | tail -2)
+
+            local count
+            count=$(echo "$last_two_verdicts" | wc -l | tr -d ' ')
+            local agrees
+            agrees=$(echo "$last_two_verdicts" | grep -c "^AGREE$" || true)
+
+            if [[ "$count" -ge 2 && "$agrees" -eq 2 ]]; then
+                log "Investigators agreed on item $item_num!"
+                break
+            fi
+        fi
+    done
+
+    # Generate summary of this item's investigation and append to deep-plan.md
+    run_deep_plan_item_summary "$item" "$item_collab_file"
+}
+
+# Summarize a single item's collab investigation into deep-plan.md
+run_deep_plan_item_summary() {
+    local item="$1"
+    local item_collab_file="$2"
+
+    local tool="$BUILDER_TOOL"
+    local tool_name
+    tool_name=$(get_tool_display_name "$tool")
+    local tool_color
+    tool_color=$(get_tool_color "$tool")
+
+    log_section "SUMMARIZING ITEM INVESTIGATION ($tool_name): $item"
+
+    local conversation
+    conversation=$(cat "$item_collab_file")
+
+    local summary_prompt="You just completed a collaborative investigation of one item. Here is the full discussion:
+
+$conversation
+
+Instructions:
+1. Append a summary of the agreed-upon findings to $DEEP_PLAN_FILE
+2. Use the header: ## Findings: $item
+3. Under the header, write:
+   - **Key Findings:** the main observations and insights both investigators agreed on
+   - **Relevant Details:** specific files, patterns, or data points that support the findings
+4. Be concise — capture the consensus, not the full discussion
+
+IMPORTANT: Do NOT make any changes to files other than appending the summary to $DEEP_PLAN_FILE. Do not edit, create, or delete any other files."
+
+    echo -e "${tool_color}--- Item Summary Start ---${NC}"
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    local debug_file="$RALPH_DIR/debug_${tool}_stream.json"
+    trap "rm -f $tmpfile" RETURN
+
+    run_tool_exec "$tool" "$summary_prompt" "$tmpfile" "$debug_file" "$BUILDER_USER_ARGS" || true
+
+    echo -e "${tool_color}--- Item Summary End ---${NC}"
+    rm -f "$debug_file"
+}
+
+# Generate final synthesis of the deep plan
+run_deep_plan_summary() {
+    local description="$1"
+
+    local tool="$BUILDER_TOOL"
+    local tool_name
+    tool_name=$(get_tool_display_name "$tool")
+    local tool_color
+    tool_color=$(get_tool_color "$tool")
+
+    log_section "GENERATING DEEP PLAN SYNTHESIS ($tool_name)"
+
+    local summary_prompt="You have completed a deep planning analysis. The full investigation is in $DEEP_PLAN_FILE.
+
+ORIGINAL GOAL: $description
+
+Instructions:
+1. Read the entire $DEEP_PLAN_FILE
+2. Append a '## Final Synthesis' section at the end of the file
+3. In the synthesis, include:
+   - A brief overview of what was investigated
+   - A comprehensive answer to the original question or a detailed plan addressing the original goal
+   - Key insights and patterns discovered across all investigation items
+   - Specific recommendations or next steps, if applicable
+4. Be thorough but well-organized — this is the primary deliverable of the analysis
+
+IMPORTANT: Do NOT make any changes to files other than appending the synthesis to $DEEP_PLAN_FILE. Do not edit, create, or delete any other files."
+
+    echo -e "${tool_color}--- Synthesis Generation Start ---${NC}"
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    local debug_file="$RALPH_DIR/debug_${tool}_stream.json"
+    trap "rm -f $tmpfile" RETURN
+
+    run_tool_exec "$tool" "$summary_prompt" "$tmpfile" "$debug_file" "$BUILDER_USER_ARGS" || true
+
+    echo -e "${tool_color}--- Synthesis Generation End ---${NC}"
+    rm -f "$debug_file"
+
+    # Print the final synthesis to console
+    echo ""
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}DEEP PLAN — FINAL SYNTHESIS${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    awk '/^## Final Synthesis/{found=1} found{print}' "$DEEP_PLAN_FILE"
+    echo -e "${GREEN}========================================${NC}"
+    echo ""
+    echo -e "Full analysis saved to ${CYAN}$DEEP_PLAN_FILE${NC}"
+}
+
+# Extract description from an existing deep plan file
+get_deep_plan_description() {
+    local header
+    header=$(head -1 "$DEEP_PLAN_FILE")
+    # Strip "# Deep Plan: " prefix
+    echo "${header#\# Deep Plan: }"
+}
+
+# Main deep plan orchestrator
+run_deep_plan() {
+    local description="$1"
+    local continue_plan="${2:-false}"
+
+    init_ralph
+
+    RALPH_START_TIME=$(date +%s)
+
+    local builder_name
+    builder_name=$(get_tool_display_name "$BUILDER_TOOL")
+    local reviewer_name
+    reviewer_name=$(get_tool_display_name "$REVIEWER_TOOL")
+
+    if [[ "$continue_plan" == true ]]; then
+        # Extract description from existing file
+        description=$(get_deep_plan_description)
+
+        local checked_count unchecked_count
+        checked_count=$(grep -c '^- \[x\] ' "$DEEP_PLAN_FILE" || true)
+        unchecked_count=$(grep -c '^- \[ \] ' "$DEEP_PLAN_FILE" || true)
+        log "Resuming Deep Plan Mode ($checked_count done, $unchecked_count remaining)"
+        log "Description: $description"
+        log "Investigator 1: $builder_name"
+        log "Investigator 2: $reviewer_name"
+        echo -e "${CYAN}Resuming deep plan ($checked_count done, $unchecked_count remaining)...${NC}"
+    else
+        log "Starting Deep Plan Mode"
+        log "Description: $description"
+        log "Investigator 1: $builder_name"
+        log "Investigator 2: $reviewer_name"
+
+        # Phase 1: Collab to produce investigation checklist
+        log_section "PHASE 1: BUILDING INVESTIGATION CHECKLIST"
+        echo -e "${CYAN}Phase 1: Building investigation checklist...${NC}"
+        run_deep_plan_collab "$description"
+    fi
+
+    # Phase 2: Investigate each item with both tools
+    log_section "PHASE 2: INVESTIGATING ITEMS"
+    echo -e "${CYAN}Phase 2: Investigating each item...${NC}"
+
+    # Count total items (checked + unchecked) for display
+    local total_items
+    total_items=$(grep -c '^- \[.\] ' "$DEEP_PLAN_FILE" || true)
+
+    # Extract only unchecked items
+    local items=()
+    while IFS= read -r line; do
+        local item="${line#- \[ \] }"
+        items+=("$item")
+    done < <(grep '^- \[ \] ' "$DEEP_PLAN_FILE")
+
+    local remaining=${#items[@]}
+    if [[ $remaining -eq 0 ]]; then
+        if [[ $total_items -gt 0 ]]; then
+            echo -e "${GREEN}All investigation items already completed.${NC}"
+            log "All items already investigated, skipping to synthesis"
+        else
+            echo -e "${RED}No investigation items found in checklist. Cannot proceed.${NC}"
+            log "Deep plan aborted: no checklist items found"
+            return 1
+        fi
+    else
+        # Strip stale final synthesis before investigating items
+        local summary_line
+        summary_line=$(grep -n '^## Final Synthesis' "$DEEP_PLAN_FILE" | head -1 | cut -d: -f1 || true)
+        if [[ -n "$summary_line" ]]; then
+            sed -i '' "${summary_line},\$d" "$DEEP_PLAN_FILE"
+            log "Removed stale final synthesis before investigating new items"
+        fi
+
+        # Calculate starting index based on how many are already done
+        local done_count=$((total_items - remaining))
+        local idx=$done_count
+        for item in "${items[@]}"; do
+            idx=$((idx + 1))
+            echo ""
+            echo -e "${BLUE}--- Investigation Item $idx of $total_items ---${NC}"
+            echo -e "${BLUE}$item${NC}"
+            echo ""
+
+            # Both investigators collab on this item until they agree
+            run_deep_plan_item_collab "$item" "$description" "$idx" "$total_items"
+
+            # Mark item as investigated in the file
+            local line_num
+            line_num=$(grep -nF -- "- [ ] ${item}" "$DEEP_PLAN_FILE" | head -1 | cut -d: -f1 || true)
+            if [[ -n "$line_num" ]]; then
+                sed -i '' "${line_num}s/- \[ \] /- [x] /" "$DEEP_PLAN_FILE"
+            fi
+
+            log "Item $idx of $total_items investigated (total: $(get_total_elapsed))"
+        done
+    fi
+
+    # Phase 3: Final synthesis (skip only if no new work and synthesis exists)
+    if grep -q '^## Final Synthesis' "$DEEP_PLAN_FILE"; then
+        echo -e "${GREEN}Final synthesis already exists, skipping.${NC}"
+        log "Final synthesis already present, skipping Phase 3"
+    else
+        log_section "PHASE 3: FINAL SYNTHESIS"
+        echo -e "${CYAN}Phase 3: Generating final synthesis...${NC}"
+        run_deep_plan_summary "$description"
+    fi
+
+    log "Deep plan complete (total: $(get_total_elapsed))"
+}
+
 # Main execution
 main() {
     local prompt=""
@@ -1679,6 +2104,38 @@ main() {
                 exit 1
             fi
             run_deep_review "$review_description"
+            exit 0
+            ;;
+        --deep-plan)
+            shift
+            if [[ "${1:-}" == "--continue" ]]; then
+                shift
+                if [[ ! -f "$DEEP_PLAN_FILE" ]]; then
+                    echo -e "${RED}Error: No existing deep plan found at $DEEP_PLAN_FILE${NC}"
+                    echo "Run a deep plan first: ralph --deep-plan \"question or goal\""
+                    exit 1
+                fi
+                local existing_items
+                existing_items=$(grep -c '^- \[.\] ' "$DEEP_PLAN_FILE" || true)
+                if [[ $existing_items -eq 0 ]]; then
+                    echo -e "${RED}Error: Existing deep plan file has no checklist items.${NC}"
+                    exit 1
+                fi
+                run_deep_plan "" true
+                exit 0
+            fi
+            local plan_description="${1:-}"
+            if [[ -z "$plan_description" ]]; then
+                plan_description=$(get_current_prompt)
+            fi
+            if [[ -z "$plan_description" ]]; then
+                echo -e "${RED}Error: No plan description provided.${NC}"
+                echo "Usage: ralph --deep-plan \"question or goal to investigate\""
+                echo "       ralph --deep-plan --continue  (resume interrupted plan)"
+                echo "Or create $PROMPT_FILE with the description."
+                exit 1
+            fi
+            run_deep_plan "$plan_description"
             exit 0
             ;;
         *)
