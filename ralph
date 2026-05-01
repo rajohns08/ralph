@@ -385,6 +385,7 @@ run_tool_exec() {
                 --print \
                 --output-format stream-json \
                 --include-partial-messages \
+                --effort max \
                 $user_args \
                 -p "$prompt" 2>&1 \
                 | awk '/^\{/ { print; fflush() }' \
